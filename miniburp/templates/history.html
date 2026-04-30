@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}History - MiniBurp{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h1>Request history
+    {% if intercept_on %}<span class="badge badge-on">Intercept ON</span>{% endif %}
+    {% if held_count %}<span class="badge badge-held">{{ held_count }} held</span>{% endif %}
+  </h1>
+  <form method="post" action="{{ url_for('clear') }}" onsubmit="return confirm('Clear all captured requests?');">
+    <button type="submit" class="danger">Clear</button>
+  </form>
+</div>
+
+<div class="filter-bar">
+  <input type="text" id="f-method" placeholder="Method (e.g. GET)" autocomplete="off">
+  <input type="text" id="f-status" placeholder="Status (e.g. 200, 4)" autocomplete="off">
+  <input type="text" id="f-url" placeholder="URL contains..." autocomplete="off">
+  <span class="scope-toggle">
+    Show:
+    <a href="?scope=in"  class="{% if scope_mode=='in'  %}sel{% endif %}">in-scope</a>
+    <a href="?scope=all" class="{% if scope_mode=='all' %}sel{% endif %}">all</a>
+  </span>
+  <span class="live-indicator" id="live-indicator">live</span>
+</div>
+
+{% if not scope_patterns and scope_mode == 'in' %}
+  <p class="muted">No scope configured &mdash; showing everything. <a href="{{ url_for('scope_page') }}">Set scope</a>.</p>
+{% endif %}
+
+<table class="history" id="history">
+  <thead>
+    <tr>
+      <th>#</th><th>Method</th><th>URL</th><th>Status</th><th>Length</th><th>Time</th><th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="history-body">
+    {% for tx in txs %}
+    <tr data-id="{{ tx.id }}" data-method="{{ tx.method }}" data-status="{{ tx.status or '' }}" data-url="{{ tx.url }}">
+      <td>{{ tx.id }}</td>
+      <td class="method-{{ tx.method.lower() }}">{{ tx.method }}</td>
+      <td class="url"><a href="{{ url_for('request_detail', tx_id=tx.id) }}">{{ tx.url }}</a></td>
+      <td class="status-{{ (tx.status or 0) // 100 }}xx">{{ tx.status or '-' }}</td>
+      <td>{{ tx.length }}</td>
+      <td>{{ tx.duration_ms or '-' }} ms</td>
+      <td class="actions">
+        <a href="{{ url_for('repeater', tx_id=tx.id) }}">Repeater</a>
+        <a href="{{ url_for('intruder', tx_id=tx.id) }}">Intruder</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<script>
+(function() {
+  const scopeMode = {{ scope_mode | tojson }};
+  const body = document.getElementById('history-body');
+  const indicator = document.getElementById('live-indicator');
+
+  function statusClass(s) {
+    if (!s) return '';
+    return 'status-' + Math.floor(s / 100) + 'xx';
+  }
+  function methodClass(m) { return 'method-' + (m || '').toLowerCase(); }
+  function repeaterHref(id) { return '/repeater/' + id; }
+  function intruderHref(id) { return '/intruder/' + id; }
+  function detailHref(id)   { return '/request/'  + id; }
+
+  function buildRow(tx) {
+    const tr = document.createElement('tr');
+    tr.dataset.id = tx.id;
+    tr.dataset.method = tx.method || '';
+    tr.dataset.status = tx.status || '';
+    tr.dataset.url = tx.url || '';
+    tr.innerHTML =
+      '<td>' + tx.id + '</td>' +
+      '<td class="' + methodClass(tx.method) + '">' + (tx.method || '') + '</td>' +
+      '<td class="url"><a href="' + detailHref(tx.id) + '">' + (tx.url || '') + '</a></td>' +
+      '<td class="' + statusClass(tx.status) + '">' + (tx.status || '-') + '</td>' +
+      '<td>' + (tx.length || 0) + '</td>' +
+      '<td>' + (tx.duration_ms == null ? '-' : tx.duration_ms + ' ms') + '</td>' +
+      '<td class="actions">' +
+        '<a href="' + repeaterHref(tx.id) + '">Repeater</a> ' +
+        '<a href="' + intruderHref(tx.id) + '">Intruder</a>' +
+      '</td>';
+    applyFilterTo(tr);
+    return tr;
+  }
+
+  function findRow(id) { return body.querySelector('tr[data-id="' + id + '"]'); }
+
+  function upsert(tx, inScope) {
+    if (scopeMode === 'in' && !inScope) return; // skip out-of-scope rows
+    let row = findRow(tx.id);
+    if (!row) {
+      row = buildRow(tx);
+      body.insertBefore(row, body.firstChild);
+    } else {
+      const cells = row.children;
+      cells[3].textContent = tx.status || '-';
+      cells[3].className = statusClass(tx.status);
+      cells[4].textContent = tx.length || 0;
+      cells[5].textContent = tx.duration_ms == null ? '-' : tx.duration_ms + ' ms';
+      row.dataset.status = tx.status || '';
+    }
+  }
+
+  // --- filter bar -----------------------------------------------------
+  const fMethod = document.getElementById('f-method');
+  const fStatus = document.getElementById('f-status');
+  const fUrl    = document.getElementById('f-url');
+
+  function applyFilterTo(tr) {
+    const m = (fMethod.value || '').toUpperCase().trim();
+    const s = (fStatus.value || '').trim();
+    const u = (fUrl.value || '').toLowerCase().trim();
+    let show = true;
+    if (m && !(tr.dataset.method || '').toUpperCase().startsWith(m)) show = false;
+    if (s && !(tr.dataset.status || '').startsWith(s)) show = false;
+    if (u && !(tr.dataset.url || '').toLowerCase().includes(u)) show = false;
+    tr.style.display = show ? '' : 'none';
+  }
+  function applyFilter() {
+    body.querySelectorAll('tr').forEach(applyFilterTo);
+  }
+  [fMethod, fStatus, fUrl].forEach(el => el.addEventListener('input', applyFilter));
+
+  // --- SSE stream -----------------------------------------------------
+  const es = new EventSource('/events');
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+    if (ev.kind === 'add' || ev.kind === 'update') {
+      upsert(ev.tx, ev.in_scope);
+    } else if (ev.kind === 'clear') {
+      body.innerHTML = '';
+    }
+  };
+  es.onerror = () => { indicator.textContent = 'reconnecting'; indicator.classList.add('stale'); };
+  es.onopen  = () => { indicator.textContent = 'live'; indicator.classList.remove('stale'); };
+})();
+</script>
+{% endblock %}

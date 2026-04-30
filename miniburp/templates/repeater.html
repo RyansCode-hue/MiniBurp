@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Repeater #{{ tx.id }} - MiniBurp{% endblock %}
+{% block content %}
+<h1>Repeater &mdash; based on #{{ tx.id }}</h1>
+<p class="muted">Edit the raw request below and hit <strong>Send</strong>. The target defaults to the original host/port/scheme.</p>
+
+<form method="post">
+  <div class="target-row">
+    <label>Scheme
+      <select name="scheme">
+        <option value="http" {% if (target_scheme or tx.scheme) == 'http' %}selected{% endif %}>http</option>
+        <option value="https" {% if (target_scheme or tx.scheme) == 'https' %}selected{% endif %}>https</option>
+      </select>
+    </label>
+    <label>Host <input type="text" name="host" value="{{ target_host or tx.host }}"></label>
+    <label>Port <input type="number" name="port" value="{{ target_port or tx.port }}" class="port"></label>
+    <button type="submit">Send</button>
+  </div>
+  <textarea name="raw_request" class="raw" spellcheck="false">{{ raw_request }}</textarea>
+</form>
+
+{% if response is not none %}
+<section>
+  <h2>Response</h2>
+  {% if response.error %}
+    <p class="err">Error: {{ response.error }}</p>
+  {% else %}
+    <p class="muted">
+      status: {{ response.status }} &middot;
+      length: {{ response.body | length }} &middot;
+      time: {{ response.duration_ms }} ms
+    </p>
+    <pre>{{ response.raw | decode }}</pre>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

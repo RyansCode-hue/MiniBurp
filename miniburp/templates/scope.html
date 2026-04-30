@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Scope - MiniBurp{% endblock %}
+{% block content %}
+<h1>Scope</h1>
+<p class="muted">
+  One host pattern per line. Shell-style globs work: <code>*.web-security-academy.net</code>,
+  <code>lab.example.com</code>, <code>*.corp.*</code>. Leave empty to treat
+  everything as in-scope. Scope affects which requests Intercept will pause
+  and which ones History shows by default.
+</p>
+<form method="post">
+  <textarea name="patterns" class="payloads" spellcheck="false">{{ patterns_text }}</textarea>
+  <div style="margin-top: 10px">
+    <button type="submit">Save</button>
+  </div>
+</form>
+{% endblock %}

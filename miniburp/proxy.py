@@ -1,0 +1,354 @@
+"""
+Core intercepting proxy.
+
+Listens on a local port. For each incoming connection:
+
+* If the first line is CONNECT host:port, we answer 200, wrap the client
+  socket with TLS using a freshly-minted cert for `host`, and open a real
+  TLS connection to `host:port` upstream. Then we read and forward HTTP
+  messages in plaintext, logging them.
+* Otherwise we treat it as a plain HTTP request, parse it, and forward.
+
+Each completed transaction lands in the shared STORE so the web UI can
+display it, replay it (Repeater), or fuzz it (Intruder).
+"""
+from __future__ import annotations
+
+import socket
+import ssl
+import threading
+import traceback
+from typing import Optional
+from urllib.parse import urlsplit
+
+from . import ca
+from .http_io import (
+    HTTPParseError,
+    build_request_bytes,
+    read_request,
+    read_response,
+)
+from .intercept import INTERCEPT, InterceptResult
+from .scope import SCOPE
+from .storage import STORE
+
+
+# ---------------------------------------------------------------------------
+# Upstream helpers
+# ---------------------------------------------------------------------------
+
+
+def _open_upstream(host: str, port: int, use_tls: bool) -> socket.socket:
+    sock = socket.create_connection((host, port), timeout=30)
+    if use_tls:
+        ctx = ssl.create_default_context()
+        # In a real tool you'd validate; here we prioritize being able to
+        # reach labs that may use self-signed certs. Document this trade-off.
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        sock = ctx.wrap_socket(sock, server_hostname=host)
+    return sock
+
+
+def _absolute_to_relative(path_or_url: str) -> tuple[str, Optional[str], Optional[int]]:
+    """
+    If the request line has an absolute URL (as plain-HTTP proxies receive),
+    split out the path and Host info. Returns (path, host_or_None, port_or_None).
+    """
+    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+        parts = urlsplit(path_or_url)
+        host = parts.hostname
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        rel = parts.path or "/"
+        if parts.query:
+            rel += "?" + parts.query
+        return rel, host, port
+    return path_or_url, None, None
+
+
+def _sanitize_headers_for_forward(headers: dict[str, str]) -> dict[str, str]:
+    """Strip hop-by-hop headers and force Connection: close for simplicity."""
+    hop_by_hop = {
+        "proxy-connection",
+        "connection",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+    out = {k: v for k, v in headers.items() if k.lower() not in hop_by_hop}
+    out["Connection"] = "close"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-connection handler
+# ---------------------------------------------------------------------------
+
+
+class ProxyHandler:
+    def __init__(self, client_sock: socket.socket, client_addr) -> None:
+        self.client = client_sock
+        self.client_addr = client_addr
+
+    # ---- entry ----------------------------------------------------------
+    def handle(self) -> None:
+        try:
+            self.client.settimeout(60)
+            first = read_request(self.client)
+            if first is None:
+                return
+            start_line, headers, body, raw = first
+            method = start_line.split(" ", 1)[0].upper()
+            if method == "CONNECT":
+                self._handle_connect(start_line, headers)
+            else:
+                self._handle_plain(start_line, headers, body, raw)
+        except (HTTPParseError, ConnectionError, socket.timeout, ssl.SSLError) as e:
+            print(f"[proxy] {self.client_addr} error: {e}")
+        except Exception:
+            traceback.print_exc()
+        finally:
+            try:
+                self.client.close()
+            except OSError:
+                pass
+
+    # ---- plain HTTP -----------------------------------------------------
+    def _handle_plain(
+        self,
+        start_line: str,
+        headers: dict[str, str],
+        body: bytes,
+        raw: bytes,
+    ) -> None:
+        method, target, version = start_line.split(" ", 2)
+        rel, abs_host, abs_port = _absolute_to_relative(target)
+        host_header = headers.get("Host", "")
+        host = abs_host or host_header.split(":", 1)[0]
+        if abs_port is not None:
+            port = abs_port
+        elif ":" in host_header:
+            port = int(host_header.split(":", 1)[1])
+        else:
+            port = 80
+
+        if not host:
+            self._send_error(400, "Bad Request: missing Host")
+            return
+
+        # Rebuild the start line with a relative path for upstream.
+        forwarded_start = f"{method} {rel} {version}"
+        forwarded_headers = _sanitize_headers_for_forward(headers)
+        forwarded_headers.setdefault("Host", host if port == 80 else f"{host}:{port}")
+        upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
+
+        tx = STORE.add(
+            method=method,
+            scheme="http",
+            host=host,
+            port=port,
+            path=rel,
+            req_headers=dict(headers),
+            req_body=body,
+            raw_request=upstream_request,
+        )
+
+        # Intercept only in-scope requests. Out-of-scope passes straight through.
+        if SCOPE.in_scope(host) and INTERCEPT.is_enabled():
+            action, new_raw = INTERCEPT.hold(tx.id, upstream_request)
+            if action == InterceptResult.DROP:
+                STORE.update(tx.id, error="dropped by intercept",
+                             finished_at=__import__("time").time())
+                self._send_error(503, "Request dropped by MiniBurp intercept")
+                return
+            if new_raw is not None and new_raw != upstream_request:
+                upstream_request = new_raw
+                STORE.update(tx.id, raw_request=new_raw)
+
+        try:
+            upstream = _open_upstream(host, port, use_tls=False)
+        except OSError as e:
+            self._send_error(502, f"Upstream connect failed: {e}")
+            STORE.update(tx.id, error=str(e))
+            return
+
+        try:
+            upstream.sendall(upstream_request)
+            resp_start, resp_headers, resp_body, raw_resp = read_response(upstream)
+            status = int(resp_start.split(" ", 2)[1])
+            STORE.update(
+                tx.id,
+                status=status,
+                resp_headers=resp_headers,
+                resp_body=resp_body,
+                raw_response=raw_resp,
+                finished_at=__import__("time").time(),
+            )
+            # Forward to client, strip hop-by-hop, force close.
+            client_headers = _sanitize_headers_for_forward(resp_headers)
+            client_headers["Content-Length"] = str(len(resp_body))
+            client_bytes = build_request_bytes(resp_start, client_headers, resp_body)
+            self.client.sendall(client_bytes)
+        finally:
+            upstream.close()
+
+    # ---- HTTPS CONNECT + MITM ------------------------------------------
+    def _handle_connect(self, start_line: str, headers: dict[str, str]) -> None:
+        # start_line: "CONNECT host:port HTTP/1.1"
+        try:
+            target = start_line.split(" ", 2)[1]
+            host, port_s = target.split(":")
+            port = int(port_s)
+        except Exception:
+            self._send_error(400, "Bad CONNECT line")
+            return
+
+        self.client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+        # Wrap client socket with a cert for `host`.
+        cert_path, key_path = ca.get_host_cert(host)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+
+        try:
+            tls_client = server_ctx.wrap_socket(self.client, server_side=True)
+        except (ssl.SSLError, OSError) as e:
+            print(f"[proxy] TLS handshake with client failed for {host}: {e}")
+            return
+
+        # Keep-alive loop: handle requests until the client closes.
+        tls_client.settimeout(60)
+        try:
+            while True:
+                parsed = read_request(tls_client)
+                if parsed is None:
+                    break
+                start_line2, headers2, body2, _raw = parsed
+                try:
+                    self._forward_https(tls_client, host, port, start_line2, headers2, body2)
+                except HTTPParseError as e:
+                    print(f"[proxy] upstream parse error: {e}")
+                    break
+                # Honor client Connection: close.
+                if headers2.get("Connection", "").lower() == "close":
+                    break
+        finally:
+            try:
+                tls_client.unwrap()
+            except (OSError, ssl.SSLError):
+                pass
+
+    def _forward_https(
+        self,
+        tls_client: ssl.SSLSocket,
+        host: str,
+        port: int,
+        start_line: str,
+        headers: dict[str, str],
+        body: bytes,
+    ) -> None:
+        method, target, version = start_line.split(" ", 2)
+        # target is usually relative ("/path?x") when we've already done CONNECT.
+        rel = target if target.startswith("/") else _absolute_to_relative(target)[0]
+
+        forwarded_start = f"{method} {rel} {version}"
+        forwarded_headers = _sanitize_headers_for_forward(headers)
+        forwarded_headers.setdefault("Host", host if port == 443 else f"{host}:{port}")
+        upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
+
+        tx = STORE.add(
+            method=method,
+            scheme="https",
+            host=host,
+            port=port,
+            path=rel,
+            req_headers=dict(headers),
+            req_body=body,
+            raw_request=upstream_request,
+        )
+
+        if SCOPE.in_scope(host) and INTERCEPT.is_enabled():
+            action, new_raw = INTERCEPT.hold(tx.id, upstream_request)
+            if action == InterceptResult.DROP:
+                STORE.update(tx.id, error="dropped by intercept",
+                             finished_at=__import__("time").time())
+                tls_client.sendall(
+                    build_request_bytes(
+                        "HTTP/1.1 503 Service Unavailable",
+                        {"Content-Length": "0", "Connection": "close"},
+                        b"",
+                    )
+                )
+                return
+            if new_raw is not None and new_raw != upstream_request:
+                upstream_request = new_raw
+                STORE.update(tx.id, raw_request=new_raw)
+
+        try:
+            upstream = _open_upstream(host, port, use_tls=True)
+        except OSError as e:
+            STORE.update(tx.id, error=str(e))
+            tls_client.sendall(
+                build_request_bytes(
+                    "HTTP/1.1 502 Bad Gateway",
+                    {"Content-Length": "0", "Connection": "close"},
+                    b"",
+                )
+            )
+            return
+
+        try:
+            upstream.sendall(upstream_request)
+            resp_start, resp_headers, resp_body, raw_resp = read_response(upstream)
+            status = int(resp_start.split(" ", 2)[1])
+            STORE.update(
+                tx.id,
+                status=status,
+                resp_headers=resp_headers,
+                resp_body=resp_body,
+                raw_response=raw_resp,
+                finished_at=__import__("time").time(),
+            )
+            client_headers = _sanitize_headers_for_forward(resp_headers)
+            client_headers["Content-Length"] = str(len(resp_body))
+            tls_client.sendall(build_request_bytes(resp_start, client_headers, resp_body))
+        finally:
+            upstream.close()
+
+    # ---- misc -----------------------------------------------------------
+    def _send_error(self, code: int, msg: str) -> None:
+        body = msg.encode("utf-8")
+        resp = (
+            f"HTTP/1.1 {code} {msg}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode("iso-8859-1") + body
+        try:
+            self.client.sendall(resp)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Server loop
+# ---------------------------------------------------------------------------
+
+
+def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
+    """Blocking call. Start the proxy listener."""
+    ca.load_or_create_ca()  # ensure CA exists at startup
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    srv.listen(64)
+    print(f"[proxy] listening on {host}:{port}")
+    while True:
+        client_sock, addr = srv.accept()
+        t = threading.Thread(
+            target=ProxyHandler(client_sock, addr).handle,
+            daemon=True,
+            name=f"proxy-{addr[0]}:{addr[1]}",
+        )
+        t.start()

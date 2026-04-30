@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}#{{ tx.id }} {{ tx.method }} {{ tx.path }} - MiniBurp{% endblock %}
+{% block content %}
+<h1>#{{ tx.id }} &mdash; {{ tx.method }} {{ tx.url }}</h1>
+<p class="muted">
+  status: {{ tx.status or '-' }} &middot;
+  length: {{ tx.length }} &middot;
+  time: {{ tx.duration_ms or '-' }} ms
+  {% if decode_note %}&middot; <span class="err">body: {{ decode_note }}</span>{% endif %}
+  {% if tx.error %} &middot; <span class="err">error: {{ tx.error }}</span>{% endif %}
+</p>
+
+<div class="actions">
+  <a class="btn" href="{{ url_for('repeater', tx_id=tx.id) }}">Open in Repeater</a>
+  <a class="btn" href="{{ url_for('intruder', tx_id=tx.id) }}">Open in Intruder</a>
+</div>
+
+<div class="pair">
+  <section>
+    <h2>Request</h2>
+    <pre>{{ tx.raw_request | decode }}</pre>
+  </section>
+  <section>
+    <h2>Response{% if not decode_note and tx.resp_headers.get('Content-Encoding') %} (decoded){% endif %}</h2>
+    <pre>{{ raw_response_display | decode }}</pre>
+  </section>
+</div>
+{% endblock %}

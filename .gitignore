@@ -1,0 +1,44 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- Build artifacts ---
+build/
+dist/
+*.spec.bak
+
+# --- macOS ---
+.DS_Store
+._*
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+
+# --- MiniBurp local secrets ---
+# The root CA private key is a per-user secret. Never commit any CA material.
+# Each user generates their own CA on first run; see miniburp/ca.py.
+ca/
+*.crt
+*.key
+*.pem
+
+# Local user prefs (Claude / cursor / etc.)
+.claude/
+CLAUDE.md
+tasks/
+
+# Anything that PyInstaller emits at the project root
+MiniBurp.app/

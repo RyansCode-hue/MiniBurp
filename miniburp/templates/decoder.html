@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Decoder - MiniBurp{% endblock %}
+{% block content %}
+<h1>Decoder</h1>
+<p class="muted">
+  Paste a string, pick an operation, click <strong>Apply</strong>. Use this on
+  <code>Set-Cookie</code> values, URL params, or any encoded blob you find in
+  History. Chain operations by copying the output back into the input.
+</p>
+
+<form method="post">
+  <div class="target-row">
+    <label>Operation
+      <select name="op">
+        {% for key, label in ops %}
+          <option value="{{ key }}" {% if op == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Apply</button>
+  </div>
+
+  <div class="pair">
+    <section>
+      <h2>Input</h2>
+      <textarea name="text" class="raw" spellcheck="false">{{ text }}</textarea>
+    </section>
+    <section>
+      <h2>Output</h2>
+      {% if error %}
+        <p class="err">{{ error }}</p>
+      {% endif %}
+      <textarea class="raw" spellcheck="false" readonly>{{ result }}</textarea>
+    </section>
+  </div>
+</form>
+{% endblock %}

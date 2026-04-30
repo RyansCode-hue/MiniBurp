@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Intercept - MiniBurp{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h1>Intercept
+    <span class="badge {% if enabled %}badge-on{% else %}badge-off{% endif %}">
+      {{ 'ON' if enabled else 'OFF' }}
+    </span>
+  </h1>
+  <div>
+    <form method="post" action="{{ url_for('intercept_toggle') }}" class="inline-form">
+      <button type="submit">{{ 'Turn OFF' if enabled else 'Turn ON' }}</button>
+    </form>
+    {% if held %}
+    <form method="post" action="{{ url_for('intercept_forward_all') }}" class="inline-form">
+      <button type="submit">Forward all</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<p class="muted">
+  When ON, in-scope requests pause here before being forwarded. Edit the raw
+  bytes below and click <strong>Forward</strong> to send, or <strong>Drop</strong>
+  to cancel the request. Out-of-scope traffic passes through untouched.
+</p>
+
+{% if not enabled and not held %}
+  <p class="muted">Intercept is off. Turn it on, then browse in the tracked window.</p>
+{% endif %}
+
+{% if not held and enabled %}
+  <p class="muted">Waiting for the next in-scope request&hellip;</p>
+{% endif %}
+
+{% for h in held %}
+<section class="held-card">
+  <h2>#{{ h.id }} &mdash; {{ h.method }} {{ h.url }}</h2>
+  <form method="post" action="{{ url_for('intercept_forward', tx_id=h.id) }}">
+    <textarea name="raw_request" class="raw" spellcheck="false">{{ h.raw }}</textarea>
+    <div style="margin-top: 8px">
+      <button type="submit">Forward</button>
+      <button type="submit" formaction="{{ url_for('intercept_drop', tx_id=h.id) }}" class="danger">Drop</button>
+    </div>
+  </form>
+</section>
+{% endfor %}
+
+<script>
+// Poll every 2s while on this page so held requests appear/disappear automatically.
+setInterval(() => { window.location.reload(); }, 2000);
+</script>
+{% endblock %}

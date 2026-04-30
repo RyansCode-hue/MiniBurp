@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Intruder #{{ tx.id }} - MiniBurp{% endblock %}
+{% block content %}
+<h1>Intruder &mdash; based on #{{ tx.id }}</h1>
+<p class="muted">
+  Wrap values to fuzz with <code>§</code> markers, e.g.
+  <code>username=§FUZZ§</code>. Positions detected in the template:
+  <strong>{{ n_positions }}</strong>.
+</p>
+
+<form method="post">
+  <div class="target-row">
+    <label>Scheme
+      <select name="scheme">
+        <option value="http"  {% if target_scheme == 'http'  %}selected{% endif %}>http</option>
+        <option value="https" {% if target_scheme == 'https' %}selected{% endif %}>https</option>
+      </select>
+    </label>
+    <label>Host <input type="text" name="host" value="{{ target_host }}"></label>
+    <label>Port <input type="number" name="port" value="{{ target_port }}" class="port"></label>
+    <label>Attack mode
+      <select name="mode">
+        <option value="sniper"         {% if mode == 'sniper'         %}selected{% endif %}>Sniper (one position at a time, list 1)</option>
+        <option value="battering-ram"  {% if mode == 'battering-ram'  %}selected{% endif %}>Battering ram (same payload in all positions, list 1)</option>
+        <option value="pitchfork"      {% if mode == 'pitchfork'      %}selected{% endif %}>Pitchfork (N lists in lockstep)</option>
+        <option value="clusterbomb"    {% if mode == 'clusterbomb'    %}selected{% endif %}>Cluster bomb (cartesian product of N lists)</option>
+      </select>
+    </label>
+    <button type="submit">Start attack</button>
+  </div>
+
+  <section>
+    <h2>Request template</h2>
+    <textarea name="template" class="raw" spellcheck="false">{{ template_text }}</textarea>
+  </section>
+
+  <section>
+    <h2>Payloads</h2>
+    <p class="muted">
+      Sniper and Battering-ram use <em>only list 1</em>. Pitchfork and
+      Cluster-bomb use one list per marker position.
+    </p>
+    <div class="payload-grid">
+      {% for pl in payload_lists %}
+      <div>
+        <label>List {{ loop.index }}{% if loop.index > n_positions and n_positions > 0 %} <span class="muted">(unused)</span>{% endif %}</label>
+        <textarea name="payloads_{{ loop.index0 }}" class="payloads" spellcheck="false">{{ pl }}</textarea>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</form>
+
+{% if results %}
+<section>
+  <h2>Results ({{ results | length }})</h2>
+  <table class="history">
+    <thead><tr><th>#</th><th>Payload</th><th>Status</th><th>Length</th><th>Time</th><th>Error</th></tr></thead>
+    <tbody>
+      {% for r in results %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td class="url">{{ r.payload }}</td>
+        <td class="status-{{ (r.status or 0) // 100 }}xx">{{ r.status or '-' }}</td>
+        <td>{{ r.length }}</td>
+        <td>{{ r.duration_ms }} ms</td>
+        <td class="err">{{ r.error or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

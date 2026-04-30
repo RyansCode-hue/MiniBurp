@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}MiniBurp{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="brand">MiniBurp</div>
+  <nav>
+    <a href="{{ url_for('history') }}">History</a>
+    <a href="{{ url_for('intercept_page') }}">Intercept</a>
+    <a href="{{ url_for('scope_page') }}">Scope</a>
+    <a href="{{ url_for('decoder') }}">Decoder</a>
+    <a href="{{ url_for('download_ca') }}">Download CA</a>
+    <form method="post" action="{{ url_for('launch_browser') }}" class="inline-form">
+      <button type="submit" class="launch-btn">Launch Browser</button>
+    </form>
+  </nav>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, msg in messages %}
+        <div class="flash flash-{{ category }}">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

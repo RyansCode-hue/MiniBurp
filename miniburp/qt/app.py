@@ -1,0 +1,84 @@
+"""
+PySide6 application entry point.
+
+Responsibilities:
+    * Start the intercepting proxy on a background thread.
+    * Create the QApplication + MainWindow.
+    * (Optionally) auto-launch the tracked browser once the proxy is listening.
+    * Block in app.exec() until the user quits.
+"""
+from __future__ import annotations
+
+import os
+import socket
+import sys
+import threading
+import time
+from typing import Optional
+
+from .. import proxy as proxy_module
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
+    """Busy-wait until the proxy accepts connections."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.3):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def run(
+    host: str = "127.0.0.1",
+    proxy_port: int = 8080,
+    launch_browser: bool = True,
+    start_url: Optional[str] = None,
+) -> int:
+    """Start everything and block until the Qt event loop exits."""
+    # Allow Qt to run in the sandbox / headless CI.
+    os.environ.setdefault("QT_QPA_PLATFORM", os.environ.get("QT_QPA_PLATFORM", ""))
+
+    # PySide6 imports are deferred so --web mode can still run without Qt installed.
+    from PySide6.QtWidgets import QApplication
+
+    from .main_window import MainWindow
+
+    # Start proxy in background thread.
+    threading.Thread(
+        target=proxy_module.serve,
+        kwargs={"host": host, "port": proxy_port},
+        daemon=True,
+        name="proxy",
+    ).start()
+
+    app = QApplication(sys.argv if sys.argv else ["miniburp"])
+    app.setApplicationName("MiniBurp")
+    app.setOrganizationName("MiniBurp")
+
+    window = MainWindow(proxy_host=host, proxy_port=proxy_port, start_url=start_url)
+    window.show()
+
+    # Make sure the bridge's pump thread is stopped before Qt tears down the
+    # application. ``closeEvent`` covers the "X" button; ``aboutToQuit`` covers
+    # Cmd-Q and other exit paths where ``closeEvent`` may not fire in time.
+    # ``shutdown()`` is idempotent so it's safe to call from both.
+    def _on_about_to_quit() -> None:
+        try:
+            window._bridge.shutdown()
+        except Exception:
+            pass
+    app.aboutToQuit.connect(_on_about_to_quit)
+
+    # Auto-launch browser once the proxy is listening.
+    if launch_browser:
+        def _launch_when_ready() -> None:
+            if _wait_for_port(host, proxy_port, timeout=5.0):
+                # Use a Qt timer to hop back onto the main thread.
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, window._launch_browser)
+        threading.Thread(target=_launch_when_ready, daemon=True, name="browser-launcher").start()
+
+    return app.exec()

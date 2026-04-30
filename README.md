@@ -1,53 +1,53 @@
-# MiniBurp
+<p align="center">
+  <img src="assets/icon.png" alt="MiniBurp logo" width="220" />
+</p>
 
-A small educational web proxy that mimics a slice of Burp Suite / OWASP ZAP.
-Intended for coursework and personal lab use only. Do not point it at systems
-you do not own or have explicit permission to test.
+<h1 align="center">MiniBurp</h1>
+
+<p align="center">
+  An educational desktop intercepting proxy for the
+  <a href="https://portswigger.net/web-security">PortSwigger Web Security Academy</a>.<br/>
+  Same idea as Burp Suite or OWASP ZAP, scoped down to coursework.
+</p>
+
+---
+
+> **Use only on systems you own or have explicit written permission to test.**
+> Pointing an intercepting proxy at third-party services without authorisation
+> is illegal under most computer-misuse laws.
 
 ## What it does
 
 - Intercepts plain HTTP traffic on `127.0.0.1:8080`.
 - Intercepts HTTPS via `CONNECT` + on-the-fly certificate generation using a
-  locally-minted root CA (`ca/ca.crt`). The tracked Chrome instance trusts it
-  automatically via SPKI pinning.
-- Logs every request + response into an in-memory store with live updates.
-- Ships two UIs:
-  - **Native desktop app** (PySide6) — default. Dark theme, tabs across the
-    top: Proxy / Intercept / Repeater / Intruder / Decoder / Scope.
-  - **Flask web UI** — optional fallback (`python run.py --web`).
+  locally-minted root CA. The tracked Chrome instance trusts it automatically
+  via SPKI pinning — no setup needed.
+- Logs every request + response into a live, filterable history.
+- Six Burp-style tabs: **Proxy**, **Intercept**, **Repeater**, **Intruder**,
+  **Decoder**, **Scope**.
+- Light and dark themes.
 
-## Features
+## Quickstart (macOS)
 
-- **Proxy tab** – filterable history (method / host / path / status / scope),
-  syntax-highlighted request + response viewers, text/hex toggle, Cmd-F find.
-- **Intercept tab** – pause, edit raw bytes, forward or drop in-scope requests.
-- **Repeater tab** – one editable request + response per sub-tab, send on demand.
-- **Intruder tab** – 4 attack modes: Sniper, Battering-Ram, Pitchfork (lockstep
-  lists), Cluster Bomb (cartesian product). Streams results into a live table.
-- **Decoder tab** – Base64 / URL / hex / HTML-entity encode+decode, MD5 / SHA-1
-  / SHA-256 hashes; chain results from output back to input.
-- **Scope tab** – glob allowlist (`*.web-security-academy.net`).
-- **Gzip / deflate / brotli** response decoding.
-
-## Install (run from source)
+You need Python 3.11+ and Google Chrome (or Chromium / Brave / Edge).
 
 ```bash
+git clone https://github.com/RyansCode-hue/MiniBurp.git
+cd MiniBurp
+
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt pyinstaller
+
+pyinstaller miniburp.spec --clean --noconfirm
+open dist/MiniBurp.app
 ```
 
-## Run from source
+That's it. The bundle that lands at `dist/MiniBurp.app` is a standalone
+macOS application — no Python required to run it after that point. Drag it
+to `/Applications` if you want it persistent.
 
-```bash
-python run.py                              # desktop app + tracked Chrome
-python run.py --url LAB_URL                # desktop + open Chrome to LAB_URL
-python run.py --no-browser                 # desktop only
-python run.py --web                        # legacy Flask UI
-python run.py --web --url LAB_URL
-```
-
-On first run you'll see:
+On first launch you'll see something like:
 
 ```
 [ca] Generated new CA at ~/Library/Application Support/MiniBurp/ca/ca.crt
@@ -55,45 +55,17 @@ On first run you'll see:
 [browser] launched Google Chrome (pid 12345) through 127.0.0.1:8080
 ```
 
-Use the Chrome window MiniBurp launched for your lab traffic — every request
-it makes flows through the proxy. A separate Chrome window you open yourself
-will NOT be tracked.
+The MiniBurp window will open and a tracked Chrome window will appear next to
+it. Use that Chrome window for your lab traffic — every request it makes
+flows through the proxy. A separate Chrome window you open yourself is **not**
+tracked.
 
-## Build a standalone macOS `.app`
-
-The PySide6 desktop UI can be bundled into a double-clickable `MiniBurp.app`
-using PyInstaller. This is what you ship for grading / handoff.
-
-```bash
-source .venv/bin/activate
-pip install pyinstaller
-pyinstaller miniburp.spec --clean --noconfirm
-```
-
-The bundle lands at `./dist/MiniBurp.app`. Two ways to launch it:
+If you want to see those `[ca] / [proxy] / [browser]` logs streamed live —
+useful while debugging — launch the binary directly instead of via `open`:
 
 ```bash
-# Quiet launch (double-clickable equivalent). Stdout/stderr go to Console.app.
-open dist/MiniBurp.app
-
-# Verbose launch — best for first runs and troubleshooting. Stderr streams
-# to your terminal so you see the [ca] / [proxy] / [browser] logs live.
 ./dist/MiniBurp.app/Contents/MacOS/MiniBurp
 ```
-
-The bundled app uses the same `~/Library/Application Support/MiniBurp/ca/`
-location as running from source, so a CA you've already imported into
-Keychain keeps working across rebuilds.
-
-### Options
-
-- `python run.py --no-browser` — skip auto-launch. Useful if you prefer to
-  configure Firefox/Safari/etc. manually.
-- `MINIBURP_CHROME=/path/to/chrome python run.py` — override browser
-  auto-detection.
-- `python run.py --proxy-port 9080` — pick a different proxy port.
-- `python run.py --web --ui-port 9888` — pick a different Flask port.
-- `MINIBURP_CA_DIR=/some/path python run.py` — override the CA directory.
 
 ## CA setup
 
@@ -103,33 +75,50 @@ On first run, MiniBurp writes its root CA to a stable per-user location:
 - **Linux:** `$XDG_DATA_HOME/miniburp/ca/ca.crt` (or `~/.local/share/miniburp/ca/ca.crt`)
 - **Windows:** `%APPDATA%\MiniBurp\ca\ca.crt`
 
-For the tracked Chrome instance MiniBurp launches, you don't need to import
+For the **tracked Chrome** instance MiniBurp launches you don't need to do
 anything — it's wired to accept this specific CA via SPKI pinning.
 
-For other browsers (Safari, a normal Chrome window, Firefox), import the CA
-into the OS trust store once:
+For **other browsers** (Safari, a normal Chrome window, Firefox), import the
+CA into the OS trust store once:
 
 **macOS** — open `~/Library/Application Support/MiniBurp/ca/ca.crt` in Finder.
-Keychain Access opens. Drag the "MiniBurp Root CA" entry into the **login**
-(or **System**) keychain, double-click it, expand **Trust**, and set
-**When using this certificate** to **Always Trust**. Close the window —
-macOS will prompt for your password to save.
+Keychain Access opens. Drag the *MiniBurp Root CA* entry into the **login**
+keychain, double-click it, expand **Trust**, set **When using this certificate**
+to **Always Trust**, close the window, enter your password to confirm.
 
-**Firefox (any OS)** — Settings → Privacy & Security → Certificates →
-View Certificates → Authorities → Import. Tick "Trust this CA to identify
-websites."
+**Firefox (any OS)** — Settings → Privacy & Security → Certificates → View
+Certificates → Authorities → Import. Tick *Trust this CA to identify
+websites*.
 
-### Manual browser setup (only with `--no-browser`)
+The CA private key never leaves your machine. Each user generates their own
+on first run; nothing in this repo carries CA material.
 
-Set your browser's HTTP and HTTPS proxy to `127.0.0.1:8080`, then import the
-CA per the section above.
+## Tabs
+
+| Tab | What it does |
+| --- | --- |
+| **Proxy** | Filterable history. Click any row to inspect the request / response, syntax-highlighted, with a hex toggle and Cmd-F find. Right-click → *Send to Repeater* / *Send to Intruder*. |
+| **Intercept** | Pause requests, edit raw bytes, forward or drop. Toggle from the toolbar. |
+| **Repeater** | Multi-tab editable request + response. Send on demand. |
+| **Intruder** | 4 attack modes — Sniper, Battering-Ram, Pitchfork (lockstep lists), Cluster Bomb (cartesian product). Streams results into a live table. |
+| **Decoder** | Base64 / URL / hex / HTML-entity encode + decode. MD5 / SHA-1 / SHA-256 hashes. Chain output back to input. |
+| **Scope** | Glob allowlist (`*.web-security-academy.net`) for filtering history and intercept. |
+
+## Themes
+
+Toggle between dark and light from the right-hand side of the toolbar
+(*Theme: Dark* / *Theme: Light*). Your choice persists across launches.
 
 ## Project layout
 
 ```
-miniburp/
+MiniBurp/
 ├── run.py                      # entry point (desktop default, --web for Flask)
+├── miniburp.spec               # PyInstaller config for the macOS .app
 ├── requirements.txt
+├── assets/
+│   ├── icon.png                # source logo (1024×1024)
+│   └── MiniBurp.icns           # generated macOS app icon
 ├── miniburp/
 │   ├── ca.py                   # root CA + per-host cert minting
 │   ├── http_io.py              # raw HTTP/1.1 read/write helpers
@@ -141,52 +130,50 @@ miniburp/
 │   ├── bodydecode.py           # gzip / deflate / brotli body decoding
 │   ├── browser.py              # Chromium auto-launch with SPKI pinning
 │   ├── decoder.py              # Base64, URL, hex, hash ops
-│   ├── webui.py                # legacy Flask UI (`--web` mode)
+│   ├── webui.py                # legacy Flask UI (--web mode)
 │   ├── templates/              # Jinja2 templates for Flask
 │   ├── static/style.css
 │   └── qt/                     # PySide6 desktop UI
-│       ├── app.py              # QApplication entry + proxy thread + Chrome
-│       ├── main_window.py      # QMainWindow + tabs + toolbar
-│       ├── signals.py          # STORE pub/sub → Qt signal bridge
-│       ├── syntax.py           # HTTP/JSON syntax highlighter
+│       ├── app.py
+│       ├── main_window.py
+│       ├── signals.py
+│       ├── syntax.py
 │       ├── widgets/
-│       │   ├── http_viewer.py  # viewer + editor with hex toggle + find
-│       │   └── find_bar.py     # Cmd-F reusable bar
 │       └── tabs/
-│           ├── proxy_tab.py
-│           ├── intercept_tab.py
-│           ├── repeater_tab.py
-│           ├── intruder_tab.py
-│           ├── decoder_tab.py
-│           └── scope_tab.py
-├── miniburp.spec               # PyInstaller config for the macOS .app
-├── LICENSE                     # MIT
+├── LICENSE
 └── README.md
 ```
 
 The CA + per-host leaf certs live outside the repo at the per-user path
-described in the *CA setup* section. They are machine-local secrets and must
-never be committed.
-
-## Ethics & scope
-
-Only use MiniBurp against:
-
-- PortSwigger Web Security Academy labs.
-- Your own applications running locally.
-- Systems where you have explicit, written authorisation.
-
-Running an intercepting proxy against third-party services without permission
-is likely illegal under most computer misuse laws.
+described above. They are machine-local secrets and must never be committed.
 
 ## Known limitations
 
 - Forces `Connection: close` on every upstream hop, so throughput is modest.
 - No WebSocket support; WS frames after an HTTP Upgrade are not intercepted.
 - CA key is stored unencrypted on disk. Fine for a lab, not for shipping.
-- Upstream TLS validation is disabled (`verify_mode = CERT_NONE`) so labs with
-  self-signed certs work.
+- Upstream TLS validation is disabled (`verify_mode = CERT_NONE`) so labs
+  with self-signed certs work.
 - In-memory storage only — history vanishes on restart.
+
+## Development
+
+If you'd rather run from source without bundling — handy while iterating on
+the UI — skip the PyInstaller step:
+
+```bash
+source .venv/bin/activate
+python run.py                         # desktop app + tracked Chrome
+python run.py --url LAB_URL           # open Chrome straight to a lab URL
+python run.py --no-browser            # desktop only
+python run.py --web                   # legacy Flask UI at http://127.0.0.1:8888/
+```
+
+Useful environment variables:
+
+- `MINIBURP_CHROME=/path/to/chrome` — override browser auto-detection
+- `MINIBURP_CA_DIR=/some/path` — override the CA directory
+- `python run.py --proxy-port 9080` — pick a different proxy port
 
 ## License
 

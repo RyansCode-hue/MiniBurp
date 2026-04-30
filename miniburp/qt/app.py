@@ -14,9 +14,29 @@ import socket
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from .. import proxy as proxy_module
+
+
+def _icon_path() -> Optional[Path]:
+    """
+    Best-effort lookup for the bundled PNG icon. Works both when running from
+    source (assets/icon.png next to run.py) and from a PyInstaller bundle
+    (PyInstaller stages it under sys._MEIPASS/assets/icon.png).
+    """
+    # PyInstaller stash dir
+    meipass = getattr(sys, "_MEIPASS", None)
+    candidates: list[Path] = []
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / "icon.png")
+    # Source layout: project root / assets / icon.png
+    candidates.append(Path(__file__).resolve().parents[2] / "assets" / "icon.png")
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
 
 
 def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -42,6 +62,7 @@ def run(
     os.environ.setdefault("QT_QPA_PLATFORM", os.environ.get("QT_QPA_PLATFORM", ""))
 
     # PySide6 imports are deferred so --web mode can still run without Qt installed.
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from .main_window import MainWindow
@@ -58,7 +79,16 @@ def run(
     app.setApplicationName("MiniBurp")
     app.setOrganizationName("MiniBurp")
 
+    # App-wide icon. The bundle's BUNDLE step sets the .icns for Finder/Dock,
+    # but setting QIcon here also covers source-runs and the running-process
+    # representation in some macOS versions.
+    icon_path = _icon_path()
+    if icon_path is not None:
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     window = MainWindow(proxy_host=host, proxy_port=proxy_port, start_url=start_url)
+    if icon_path is not None:
+        window.setWindowIcon(QIcon(str(icon_path)))
     window.show()
 
     # Make sure the bridge's pump thread is stopped before Qt tears down the

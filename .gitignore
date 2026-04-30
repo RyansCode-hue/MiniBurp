@@ -35,6 +35,10 @@ ca/
 *.key
 *.pem
 
+# Intermediate icon assembly directory — only the .icns and the source PNG
+# get committed.
+assets/*.iconset/
+
 # Local user prefs (Claude / cursor / etc.)
 .claude/
 CLAUDE.md

@@ -27,7 +27,11 @@ a = Analysis(
     ["run.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
+    datas=[
+        # Bundle the PNG icon so the QApplication can set it as the window /
+        # Dock icon at runtime. The .icns is consumed by BUNDLE below.
+        ("assets/icon.png", "assets"),
+    ],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
@@ -67,7 +71,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon="assets/MiniBurp.icns",
 )
 
 coll = COLLECT(
@@ -84,7 +88,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="MiniBurp.app",
-    icon=None,
+    icon="assets/MiniBurp.icns",
     bundle_identifier="com.miniburp.app",
     info_plist={
         "CFBundleName": "MiniBurp",

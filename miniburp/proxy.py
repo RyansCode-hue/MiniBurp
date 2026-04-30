@@ -336,14 +336,39 @@ class ProxyHandler:
 # ---------------------------------------------------------------------------
 
 
-def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
-    """Blocking call. Start the proxy listener."""
+def bind(host: str = "127.0.0.1", port: int = 8080) -> socket.socket:
+    """Bind and listen synchronously. Raises OSError if the port is taken."""
     ca.load_or_create_ca()  # ensure CA exists at startup
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((host, port))
     srv.listen(64)
-    print(f"[proxy] listening on {host}:{port}")
+    return srv
+
+
+def bind_with_fallback(
+    host: str = "127.0.0.1",
+    preferred_port: int = 8080,
+    max_tries: int = 10,
+) -> socket.socket:
+    """
+    Try `preferred_port`, then `preferred_port+1..+max_tries-1`. Returns the
+    first socket that bound. Raises the last OSError if none worked.
+    """
+    last: OSError | None = None
+    for offset in range(max_tries):
+        try:
+            return bind(host, preferred_port + offset)
+        except OSError as e:
+            last = e
+    assert last is not None
+    raise last
+
+
+def accept_loop(srv: socket.socket) -> None:
+    """Blocking accept loop on an already-bound listener socket."""
+    sockname = srv.getsockname()
+    print(f"[proxy] listening on {sockname[0]}:{sockname[1]}")
     while True:
         client_sock, addr = srv.accept()
         t = threading.Thread(
@@ -352,3 +377,8 @@ def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
             name=f"proxy-{addr[0]}:{addr[1]}",
         )
         t.start()
+
+
+def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
+    """Blocking call. Bind + accept. Used by the legacy --web mode."""
+    accept_loop(bind(host, port))

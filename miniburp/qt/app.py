@@ -63,21 +63,40 @@ def run(
 
     # PySide6 imports are deferred so --web mode can still run without Qt installed.
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     from .main_window import MainWindow
-
-    # Start proxy in background thread.
-    threading.Thread(
-        target=proxy_module.serve,
-        kwargs={"host": host, "port": proxy_port},
-        daemon=True,
-        name="proxy",
-    ).start()
 
     app = QApplication(sys.argv if sys.argv else ["miniburp"])
     app.setApplicationName("MiniBurp")
     app.setOrganizationName("MiniBurp")
+
+    # Bind the proxy in the foreground so a port-in-use error surfaces to the
+    # user instead of dying silently in a daemon thread (where stderr from a
+    # Finder-launched .app is invisible).
+    try:
+        srv = proxy_module.bind_with_fallback(host=host, preferred_port=proxy_port)
+    except OSError as e:
+        QMessageBox.critical(
+            None,
+            "MiniBurp — cannot start proxy",
+            f"Failed to bind {host}:{proxy_port} (or any of the next 9 ports).\n\n"
+            f"{e}\n\n"
+            f"Another process is probably using these ports. Quit it and relaunch, "
+            f"or run from source with --proxy-port to pick a different port.",
+        )
+        return 1
+
+    actual_port = srv.getsockname()[1]
+    if actual_port != proxy_port:
+        print(f"[proxy] port {proxy_port} was busy, fell back to {actual_port}")
+
+    threading.Thread(
+        target=proxy_module.accept_loop,
+        args=(srv,),
+        daemon=True,
+        name="proxy",
+    ).start()
 
     # App-wide icon. The bundle's BUNDLE step sets the .icns for Finder/Dock,
     # but setting QIcon here also covers source-runs and the running-process
@@ -86,7 +105,7 @@ def run(
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
 
-    window = MainWindow(proxy_host=host, proxy_port=proxy_port, start_url=start_url)
+    window = MainWindow(proxy_host=host, proxy_port=actual_port, start_url=start_url)
     if icon_path is not None:
         window.setWindowIcon(QIcon(str(icon_path)))
     window.show()
@@ -105,7 +124,7 @@ def run(
     # Auto-launch browser once the proxy is listening.
     if launch_browser:
         def _launch_when_ready() -> None:
-            if _wait_for_port(host, proxy_port, timeout=5.0):
+            if _wait_for_port(host, actual_port, timeout=5.0):
                 # Use a Qt timer to hop back onto the main thread.
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(0, window._launch_browser)

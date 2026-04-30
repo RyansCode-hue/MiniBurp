@@ -13,6 +13,7 @@ theme change without per-widget plumbing.
 """
 from __future__ import annotations
 
+import socket
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -330,7 +331,28 @@ class MainWindow(QMainWindow):
         self._apply_theme("light" if self._theme == "dark" else "dark")
 
     # ---- toolbar actions ----------------------------------------------
+    def _proxy_is_listening(self) -> bool:
+        """Quick TCP probe so we don't launch Chrome at a dead proxy."""
+        try:
+            with socket.create_connection(
+                (self._proxy_host, self._proxy_port), timeout=0.3
+            ):
+                return True
+        except OSError:
+            return False
+
     def _launch_browser(self) -> None:
+        if not self._proxy_is_listening():
+            QMessageBox.warning(
+                self,
+                "Proxy not running",
+                f"The proxy at {self._proxy_host}:{self._proxy_port} isn't "
+                f"accepting connections, so Chrome would show "
+                f"ERR_PROXY_CONNECTION_FAILED.\n\n"
+                f"Quit MiniBurp and relaunch. If the issue persists, another "
+                f"process is using the port.",
+            )
+            return
         try:
             proc = browser_module.launch(
                 proxy_host=self._proxy_host,

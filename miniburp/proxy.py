@@ -14,6 +14,7 @@ display it, replay it (Repeater), or fuzz it (Intruder).
 """
 from __future__ import annotations
 
+import select
 import socket
 import ssl
 import threading
@@ -29,6 +30,7 @@ from .http_io import (
     read_response,
 )
 from .intercept import INTERCEPT, InterceptResult
+from .noise import is_noise
 from .scope import SCOPE
 from .storage import STORE
 
@@ -138,6 +140,12 @@ class ProxyHandler:
             self._send_error(400, "Bad Request: missing Host")
             return
 
+        # Lab-only invariant: drop background chatter on the floor instead of
+        # logging it. Chrome's plain-HTTP chatter is rare; close the connection
+        # and let the client deal with it (most chatter is best-effort anyway).
+        if is_noise(host):
+            return
+
         # Rebuild the start line with a relative path for upstream.
         forwarded_start = f"{method} {rel} {version}"
         forwarded_headers = _sanitize_headers_for_forward(headers)
@@ -194,6 +202,61 @@ class ProxyHandler:
         finally:
             upstream.close()
 
+    # ---- noise pass-through --------------------------------------------
+    def _transparent_tunnel(self, host: str, port: int) -> None:
+        """
+        Open a raw TCP tunnel to host:port and splice bytes both ways.
+        Used for known-chatty hosts so we don't mint a MITM leaf cert
+        or log them to history. Chrome's flags should keep most of this
+        traffic from happening at all; this is the safety net.
+        """
+        try:
+            upstream = socket.create_connection((host, port), timeout=30)
+        except OSError:
+            # Best-effort tell the client we couldn't connect, then bail.
+            try:
+                self.client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n"
+                                    b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            return
+
+        try:
+            self.client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        except OSError:
+            upstream.close()
+            return
+
+        socks = [self.client, upstream]
+        try:
+            while True:
+                ready, _, _ = select.select(socks, [], [], 60)
+                if not ready:
+                    break
+                done = False
+                for sock in ready:
+                    try:
+                        data = sock.recv(65536)
+                    except OSError:
+                        done = True
+                        break
+                    if not data:
+                        done = True
+                        break
+                    peer = upstream if sock is self.client else self.client
+                    try:
+                        peer.sendall(data)
+                    except OSError:
+                        done = True
+                        break
+                if done:
+                    break
+        finally:
+            try:
+                upstream.close()
+            except OSError:
+                pass
+
     # ---- HTTPS CONNECT + MITM ------------------------------------------
     def _handle_connect(self, start_line: str, headers: dict[str, str]) -> None:
         # start_line: "CONNECT host:port HTTP/1.1"
@@ -203,6 +266,13 @@ class ProxyHandler:
             port = int(port_s)
         except Exception:
             self._send_error(400, "Bad CONNECT line")
+            return
+
+        # Lab-only invariant: never MITM Chrome's background chatter.
+        # Transparent-tunnel the bytes so Chrome stays functional, but
+        # don't mint a leaf cert and don't log to history.
+        if is_noise(host):
+            self._transparent_tunnel(host, port)
             return
 
         self.client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")

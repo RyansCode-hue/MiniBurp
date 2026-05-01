@@ -6,18 +6,16 @@ This is the same trick Burp Suite's embedded browser uses:
 * `--proxy-server=http://host:port` sends all traffic through us.
 * `--user-data-dir=<tmp>` uses a disposable profile so the user's real
   Chrome isn't touched and no extensions / saved passwords leak in.
-* `--ignore-certificate-errors-spki-list=<b64sha256>` waives cert errors
-  ONLY for certificates whose SubjectPublicKeyInfo matches our root CA.
-  Safer than `--ignore-certificate-errors`, which silently disables TLS
-  validation for everything.
+
+For HTTPS interception to work without warnings, MiniBurp's root CA must
+be imported into the OS trust store (Keychain on macOS, etc.). The CLI
+prints the path to ca.crt at startup.
 
 We search the usual install paths for Chrome, Chromium, Brave, or Edge.
 The env var MINIBURP_CHROME overrides auto-detection.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import os
 import platform
 import shutil
@@ -25,10 +23,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
-
-from cryptography.hazmat.primitives import serialization
-
-from . import ca as ca_module
 
 
 CHROME_CANDIDATES = {
@@ -84,16 +78,6 @@ def find_chrome() -> Optional[str]:
     return None
 
 
-def ca_spki_hash() -> str:
-    """Base64-encoded SHA-256 of our CA's SubjectPublicKeyInfo (DER)."""
-    cert, _ = ca_module.load_or_create_ca()
-    spki = cert.public_key().public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return base64.b64encode(hashlib.sha256(spki).digest()).decode("ascii")
-
-
 def build_command(
     exe: str,
     proxy_host: str,
@@ -102,6 +86,11 @@ def build_command(
     start_url: Optional[str],
 ) -> list[str]:
     """Assemble the argv for the browser. Kept separate so we can unit-test it."""
+    # MiniBurp is a lab-only tool. Every flag below either configures the proxy
+    # path or silences Chrome background chatter (Safe Browsing list refresh,
+    # Omaha update polling, component CRX downloads, sync, telemetry, etc.) so
+    # the proxy history shows only the website under test. If you remove a
+    # flag, expect Google-services traffic to start appearing in history.
     cmd = [
         exe,
         f"--user-data-dir={user_data_dir}",
@@ -111,10 +100,21 @@ def build_command(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-infobars",
-        "--disable-features=Translate,OptimizationHints",
-        # Trust MiniBurp's CA for this session only.
-        f"--ignore-certificate-errors-spki-list={ca_spki_hash()}",
         "--allow-insecure-localhost",
+        # Chatter suppression — kills Safe Browsing refresh, Omaha update
+        # polling, Chrome Variations, field trials, network time, etc.
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-domain-reliability",
+        "--disable-client-side-phishing-detection",
+        "--metrics-recording-only",
+        "--no-pings",
+        "--safebrowsing-disable-auto-update",
+        "--disable-features=Translate,OptimizationHints,"
+        "OptimizationGuideModelDownloading,MediaRouter,"
+        "InterestFeedContentSuggestions,CalculateNativeWinOcclusion",
     ]
     if start_url:
         cmd.append(start_url)

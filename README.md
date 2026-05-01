@@ -20,8 +20,8 @@
 
 - Intercepts plain HTTP traffic on `127.0.0.1:8080`.
 - Intercepts HTTPS via `CONNECT` + on-the-fly certificate generation using a
-  locally-minted root CA. The tracked Chrome instance trusts it automatically
-  via SPKI pinning — no setup needed.
+  locally-minted root CA. Import the CA into your OS trust store once
+  (instructions below) and HTTPS labs load without warnings.
 - Logs every request + response into a live, filterable history.
 - Six Burp-style tabs: **Proxy**, **Intercept**, **Repeater**, **Intruder**,
   **Decoder**, **Scope**.
@@ -75,16 +75,26 @@ On first run, MiniBurp writes its root CA to a stable per-user location:
 - **Linux:** `$XDG_DATA_HOME/miniburp/ca/ca.crt` (or `~/.local/share/miniburp/ca/ca.crt`)
 - **Windows:** `%APPDATA%\MiniBurp\ca\ca.crt`
 
-For the **tracked Chrome** instance MiniBurp launches you don't need to do
-anything — it's wired to accept this specific CA via SPKI pinning.
+Import the CA into the OS trust store once. The tracked Chrome instance and
+any other browser on the machine will then accept MiniBurp's MITM certs
+without warnings.
 
-For **other browsers** (Safari, a normal Chrome window, Firefox), import the
-CA into the OS trust store once:
+**macOS (one-liner, no sudo)**:
 
-**macOS** — open `~/Library/Application Support/MiniBurp/ca/ca.crt` in Finder.
-Keychain Access opens. Drag the *MiniBurp Root CA* entry into the **login**
-keychain, double-click it, expand **Trust**, set **When using this certificate**
-to **Always Trust**, close the window, enter your password to confirm.
+```bash
+security add-trusted-cert -d -r trustRoot \
+  -k "$HOME/Library/Keychains/login.keychain-db" \
+  ~/Library/Application\ Support/MiniBurp/ca/ca.crt
+```
+
+You'll get a Touch ID / password prompt. After that, fully quit Chrome (⌘Q)
+and relaunch MiniBurp.
+
+**macOS (GUI alternative)** — open `~/Library/Application Support/MiniBurp/ca/ca.crt`
+in Finder. Keychain Access opens. Drag the *MiniBurp Root CA* entry into the
+**login** keychain, double-click it, expand **Trust**, set **When using this
+certificate** to **Always Trust**, close the window, enter your password to
+confirm.
 
 **Firefox (any OS)** — Settings → Privacy & Security → Certificates → View
 Certificates → Authorities → Import. Tick *Trust this CA to identify
@@ -128,7 +138,7 @@ MiniBurp/
 │   ├── intercept.py            # pause / edit / forward / drop coordinator
 │   ├── scope.py                # host allowlist (fnmatch globs)
 │   ├── bodydecode.py           # gzip / deflate / brotli body decoding
-│   ├── browser.py              # Chromium auto-launch with SPKI pinning
+│   ├── browser.py              # Chromium auto-launch through the proxy
 │   ├── decoder.py              # Base64, URL, hex, hash ops
 │   ├── webui.py                # legacy Flask UI (--web mode)
 │   ├── templates/              # Jinja2 templates for Flask

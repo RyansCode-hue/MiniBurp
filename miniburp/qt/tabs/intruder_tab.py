@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import itertools
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -35,10 +35,38 @@ from PySide6.QtWidgets import (
 from ... import bodydecode
 from ...sender import recompute_content_length, send_raw
 from ...storage import STORE
+from ..widgets.combobox import MiniBurpComboBox
 from ..widgets.http_viewer import HttpEditor
 
 
 MARK_RE = re.compile(r"§[^§]*§")
+
+
+class _NumericItem(QTableWidgetItem):
+    """Table cell that sorts on a numeric key while displaying formatted text.
+
+    QTableWidget's default sort compares `data(Qt.DisplayRole)` as strings,
+    so columns like Status / Length / Time would sort '10' before '2'. We
+    keep an explicit `_sort_value` and override `__lt__` so clicking the
+    column header gives proper numeric ascending / descending order.
+    """
+
+    def __init__(self, sort_value, display: Optional[str] = None) -> None:
+        super().__init__(display if display is not None else str(sort_value))
+        self._sort_value = sort_value
+
+    def __lt__(self, other: object) -> bool:  # noqa: D401 - Qt comparison hook
+        if isinstance(other, _NumericItem):
+            # None sorts to the end regardless of direction so partial /
+            # in-flight rows don't jump above completed ones.
+            if self._sort_value is None and other._sort_value is None:
+                return False
+            if self._sort_value is None:
+                return False
+            if other._sort_value is None:
+                return True
+            return self._sort_value < other._sort_value
+        return super().__lt__(other)
 
 
 def _replace_markers(template: str, replacements: list[str]) -> str:
@@ -96,6 +124,7 @@ class _AttackWorker(QThread):
         attempts: list[tuple[str, str]],
         match_pattern: str = "",
         match_regex: bool = False,
+        concurrency: int = 4,
     ) -> None:
         super().__init__()
         self.host = host
@@ -104,6 +133,9 @@ class _AttackWorker(QThread):
         self.attempts = attempts
         self.match_pattern = match_pattern
         self.match_regex = match_regex
+        # Clamp to avoid both pointless parallelism and abusive thread counts.
+        # 1 = the old serial behaviour; sensible cap is the size of the attack.
+        self.concurrency = max(1, min(concurrency, max(1, len(attempts))))
         self._abort = False
 
         # Compile once. Invalid regex → no rows ever match; the UI will surface
@@ -131,24 +163,84 @@ class _AttackWorker(QThread):
             return self._match_re.search(text) is not None
         return self._match_needle.encode("utf-8", errors="ignore") in decoded.lower()
 
+    def _do_one(self, label: str, text: str) -> Optional[dict]:
+        """Build the raw request for one attempt, send it, and return the row."""
+        if self._abort:
+            return None
+        raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("iso-8859-1")
+        # Body length changes per attempt — recompute Content-Length so we
+        # don't ship truncated requests for every payload but the first.
+        raw = recompute_content_length(raw)
+        r = send_raw(self.host, self.port, self.scheme, raw)
+        matched = self._scan_body(r.get("body", b""), r.get("headers") or {})
+        return {
+            "payload": label,
+            "status": r.get("status"),
+            "length": len(r.get("body", b"")),
+            "duration_ms": r.get("duration_ms", 0),
+            "error": r.get("error"),
+            "matched": matched,
+        }
+
     def run(self) -> None:
-        for i, (label, text) in enumerate(self.attempts):
-            if self._abort:
-                break
-            raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("iso-8859-1")
-            # Body length changes per attempt — recompute Content-Length so we
-            # don't ship truncated requests for every payload but the first.
-            raw = recompute_content_length(raw)
-            r = send_raw(self.host, self.port, self.scheme, raw)
-            matched = self._scan_body(r.get("body", b""), r.get("headers") or {})
-            self.result_ready.emit(i, {
-                "payload": label,
-                "status": r.get("status"),
-                "length": len(r.get("body", b"")),
-                "duration_ms": r.get("duration_ms", 0),
-                "error": r.get("error"),
-                "matched": matched,
-            })
+        """Run the attack with up to `self.concurrency` requests in flight.
+
+        Workers stream results back via ``result_ready.emit(index, row)``.
+        Order is determined by which request finishes first — a 10s outlier
+        no longer blocks the rest of the queue. The row index is preserved
+        so the UI table updates the correct row regardless of finish order.
+        """
+        if not self.attempts:
+            self.all_done.emit()
+            return
+
+        # Single-worker path keeps the cleaner stack trace + lower overhead
+        # for the rare "concurrency: 1" case (e.g. labs that genuinely care
+        # about request order).
+        if self.concurrency <= 1:
+            for i, (label, text) in enumerate(self.attempts):
+                if self._abort:
+                    break
+                row = self._do_one(label, text)
+                if row is not None:
+                    self.result_ready.emit(i, row)
+            self.all_done.emit()
+            return
+
+        pool = ThreadPoolExecutor(
+            max_workers=self.concurrency,
+            thread_name_prefix="intruder",
+        )
+        future_to_index: dict = {}
+        try:
+            for i, (label, text) in enumerate(self.attempts):
+                fut = pool.submit(self._do_one, label, text)
+                future_to_index[fut] = i
+
+            for fut in as_completed(future_to_index):
+                if self._abort:
+                    # Cancel anything that hasn't started; in-flight requests
+                    # will finish under us but their results get dropped.
+                    for f in future_to_index:
+                        f.cancel()
+                    break
+                try:
+                    row = fut.result()
+                except Exception as e:
+                    row = {
+                        "payload": "",
+                        "status": None,
+                        "length": 0,
+                        "duration_ms": 0,
+                        "error": str(e),
+                        "matched": False,
+                    }
+                if row is not None:
+                    self.result_ready.emit(future_to_index[fut], row)
+        finally:
+            # wait=False so a Stop click returns control promptly even if a
+            # slow request is still mid-send. cancel_futures cleans the queue.
+            pool.shutdown(wait=False, cancel_futures=True)
         self.all_done.emit()
 
 
@@ -172,7 +264,7 @@ class IntruderSession(QWidget):
         # ---- top controls ----
         controls = QGridLayout()
         controls.addWidget(QLabel("Scheme:", self), 0, 0)
-        self._scheme = QComboBox(self)
+        self._scheme = MiniBurpComboBox(self)
         self._scheme.addItems(["http", "https"])
         self._scheme.setCurrentText(scheme)
         controls.addWidget(self._scheme, 0, 1)
@@ -188,12 +280,26 @@ class IntruderSession(QWidget):
         controls.addWidget(self._port, 0, 5)
 
         controls.addWidget(QLabel("Mode:", self), 0, 6)
-        self._mode = QComboBox(self)
+        self._mode = MiniBurpComboBox(self)
         self._mode.addItem("Sniper (list 1, one marker at a time)", "sniper")
         self._mode.addItem("Battering ram (list 1, every marker)", "battering-ram")
         self._mode.addItem("Pitchfork (N lists, lockstep)", "pitchfork")
         self._mode.addItem("Cluster bomb (N lists, cartesian)", "clusterbomb")
         controls.addWidget(self._mode, 0, 7, 1, 2)
+
+        # Threads spinbox stays in the top controls row — it's an attack-wide
+        # setting, not a template manipulation. Position controls (Add §,
+        # Clear §, positions count) live with the template down below.
+        controls.addWidget(QLabel("Threads:", self), 1, 0)
+        self._threads = QSpinBox(self)
+        self._threads.setRange(1, 64)
+        self._threads.setValue(20)
+        self._threads.setToolTip(
+            "Number of requests in flight at once.\n"
+            "Default 20 matches Burp Pro. Lower to 1 for ordered attacks,\n"
+            "or when the target starts returning 429 / 503."
+        )
+        controls.addWidget(self._threads, 1, 1)
 
         self._start_btn = QPushButton("Start attack", self)
         self._start_btn.setProperty("role", "primary")
@@ -202,14 +308,41 @@ class IntruderSession(QWidget):
         controls.addWidget(self._start_btn, 1, 7)
         controls.addWidget(self._stop_btn, 1, 8)
 
+        # ---- template + payloads + results splitter ----
+        # No title on the editor — the position-controls row above it makes
+        # the purpose obvious.
+        self._template = HttpEditor("", parent=self)
+        self._template.set_bytes(raw)
+        self._template.edit.textChanged.connect(self._rebuild_payload_panels)
+
+        # Position controls live directly above the template, grouped in a
+        # container so they ride the splitter with the editor.
         self._pos_label = QLabel("positions: 0", self)
         self._pos_label.setProperty("role", "muted")
-        controls.addWidget(self._pos_label, 1, 0, 1, 3)
+        self._add_pos_btn = QPushButton("Add §", self)
+        self._add_pos_btn.setToolTip(
+            "Wrap the selected text in the template with § markers.\n"
+            "If nothing is selected, inserts an empty §§ at the cursor.\n"
+            "Shortcut: ⌘I"
+        )
+        self._clear_pos_btn = QPushButton("Clear §", self)
+        self._clear_pos_btn.setToolTip("Remove every § marker from the template")
 
-        # ---- template + payloads + results splitter ----
-        self._template = HttpEditor("Request template (wrap values in §…§)", parent=self)
-        self._template.set_bytes(raw, title="Request template (wrap values in §…§)")
-        self._template.edit.textChanged.connect(self._rebuild_payload_panels)
+        pos_row = QHBoxLayout()
+        pos_row.setContentsMargins(0, 0, 0, 0)
+        pos_row.setSpacing(6)
+        pos_row.addWidget(self._add_pos_btn)
+        pos_row.addWidget(self._clear_pos_btn)
+        pos_row.addSpacing(8)
+        pos_row.addWidget(self._pos_label)
+        pos_row.addStretch(1)
+
+        template_wrap = QWidget(self)
+        template_wrap_layout = QVBoxLayout(template_wrap)
+        template_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        template_wrap_layout.setSpacing(4)
+        template_wrap_layout.addLayout(pos_row)
+        template_wrap_layout.addWidget(self._template, 1)
 
         self._payloads_wrap = QWidget(self)
         self._payloads_layout = QVBoxLayout(self._payloads_wrap)
@@ -218,7 +351,7 @@ class IntruderSession(QWidget):
         self._payload_edits: list[QPlainTextEdit] = []
 
         left = QSplitter(Qt.Vertical, self)
-        left.addWidget(self._template)
+        left.addWidget(template_wrap)
         left.addWidget(self._payloads_wrap)
         left.setStretchFactor(0, 3)
         left.setStretchFactor(1, 2)
@@ -242,6 +375,11 @@ class IntruderSession(QWidget):
         self._results = QTableWidget(0, 6, self)
         self._results.setHorizontalHeaderLabels(["#", "Payload", "Status", "Length", "Time", "Match"])
         self._results.verticalHeader().setVisible(False)
+        # Click a header to sort; click again to flip direction. _NumericItem
+        # keeps numeric columns ordering correctly. Updates in _on_result
+        # toggle sorting off then back on so streaming writes don't shuffle
+        # rows mid-attack.
+        self._results.setSortingEnabled(True)
         # Payload is the variable-width column; the rest get widths that fit
         # both the data and the new uppercase-spaced headers.
         header = self._results.horizontalHeader()
@@ -280,8 +418,44 @@ class IntruderSession(QWidget):
         self._mode.currentIndexChanged.connect(self._rebuild_payload_panels)
         self._match_input.textChanged.connect(self._update_match_status)
         self._match_regex.toggled.connect(self._update_match_status)
+        self._add_pos_btn.clicked.connect(self._add_position)
+        self._clear_pos_btn.clicked.connect(self._clear_positions)
+
+        # Cmd+I / Ctrl+I to add a position — matches Burp's muscle memory.
+        # Scoped to the template editor so it doesn't fire anywhere else.
+        sc = QShortcut(QKeySequence("Ctrl+I"), self._template.edit)
+        sc.setContext(Qt.WidgetWithChildrenShortcut)
+        sc.activated.connect(self._add_position)
 
         self._worker: Optional[_AttackWorker] = None
+
+    # ---- position markers ----------------------------------------------
+    def _add_position(self) -> None:
+        """Wrap the current selection in §…§; if nothing is selected, insert
+        an empty §§ at the cursor and park it between the markers."""
+        editor = self._template.edit
+        cursor = editor.textCursor()
+        # Qt returns U+2029 for newlines inside selectedText(); normalize so a
+        # multi-line selection doesn't smuggle a paragraph separator into the
+        # template. (Single-line is the common case for payload positions.)
+        selected = cursor.selectedText().replace("\u2029", "\n")
+        if selected:
+            cursor.insertText(f"§{selected}§")
+        else:
+            cursor.insertText("§§")
+            cursor.movePosition(cursor.MoveOperation.Left, cursor.MoveMode.MoveAnchor, 1)
+            editor.setTextCursor(cursor)
+        editor.setFocus()
+
+    def _clear_positions(self) -> None:
+        """Strip every § from the template in one shot."""
+        text = self._template.text_value()
+        if "§" not in text:
+            return
+        cleaned = text.replace("§", "")
+        # set_bytes routes through the editor's _render → setPlainText, which
+        # fires textChanged so _rebuild_payload_panels picks the change up.
+        self._template.set_bytes(cleaned.encode("iso-8859-1", errors="replace"))
 
     def _update_match_status(self) -> None:
         text = self._match_input.text()
@@ -358,15 +532,21 @@ class IntruderSession(QWidget):
             return
 
         # Pre-populate rows with blanks so results can stream in by index.
+        # Sorting must be off while we write by row index — toggle it back on
+        # afterwards so the user can click headers to sort live results.
+        self._results.setSortingEnabled(False)
         self._results.setRowCount(0)
         self._results.setRowCount(len(attempts))
         for i, (label, _text) in enumerate(attempts):
-            self._results.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self._results.setItem(i, 0, _NumericItem(i + 1))
             self._results.setItem(i, 1, QTableWidgetItem(label))
-            self._results.setItem(i, 2, QTableWidgetItem("…"))
-            self._results.setItem(i, 3, QTableWidgetItem(""))
-            self._results.setItem(i, 4, QTableWidgetItem(""))
-            self._results.setItem(i, 5, QTableWidgetItem(""))
+            # Pending rows carry sort_value=None so they sort to the end
+            # regardless of direction — keeps "…" placeholders out of the way.
+            self._results.setItem(i, 2, _NumericItem(None, "…"))
+            self._results.setItem(i, 3, _NumericItem(None, ""))
+            self._results.setItem(i, 4, _NumericItem(None, ""))
+            self._results.setItem(i, 5, _NumericItem(None, ""))
+        self._results.setSortingEnabled(True)
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -378,6 +558,7 @@ class IntruderSession(QWidget):
             attempts,
             match_pattern=self._match_input.text(),
             match_regex=self._match_regex.isChecked(),
+            concurrency=int(self._threads.value()),
         )
         worker.result_ready.connect(self._on_result)
         worker.all_done.connect(self._on_done)
@@ -389,9 +570,32 @@ class IntruderSession(QWidget):
         if self._worker is not None:
             self._worker.abort()
 
+    def _find_row(self, attempt_index: int) -> int:
+        """Map an attempt index (#) to its current visual row in the table.
+
+        The user may have sorted the table while the attack runs, so the
+        original `i` is no longer the row position. We look up the row whose
+        # cell holds (attempt_index + 1).
+        """
+        target = attempt_index + 1
+        for r in range(self._results.rowCount()):
+            item = self._results.item(r, 0)
+            if isinstance(item, _NumericItem) and item._sort_value == target:
+                return r
+        return attempt_index  # fallback to insertion order
+
     def _on_result(self, i: int, row: dict) -> None:
+        # Disable sorting while we write or live re-sort will shuffle the
+        # row we're targeting mid-update. Re-enable at the end so the user's
+        # chosen sort takes effect on the new values immediately.
+        self._results.setSortingEnabled(False)
+        r = self._find_row(i)
+
         status = row.get("status")
-        status_item = QTableWidgetItem(str(status) if status is not None else "-")
+        status_item = _NumericItem(
+            status if isinstance(status, int) else None,
+            str(status) if status is not None else "-",
+        )
         color = "#9a9aa8"
         s = status or 0
         if 200 <= s < 300:
@@ -403,13 +607,17 @@ class IntruderSession(QWidget):
         elif s >= 500:
             color = "#ef6767"
         status_item.setForeground(QBrush(QColor(color)))
+        self._results.setItem(r, 2, status_item)
 
-        self._results.setItem(i, 2, status_item)
-        self._results.setItem(i, 3, QTableWidgetItem(str(row.get("length", 0))))
-        self._results.setItem(i, 4, QTableWidgetItem(f"{row.get('duration_ms', 0)} ms"))
+        length = int(row.get("length") or 0)
+        self._results.setItem(r, 3, _NumericItem(length))
+        dur = int(row.get("duration_ms") or 0)
+        self._results.setItem(r, 4, _NumericItem(dur, f"{dur} ms"))
 
         matched = bool(row.get("matched"))
-        match_item = QTableWidgetItem("✓" if matched else "")
+        # Match column sort value: 1 = matched, 0 = not. Click the header to
+        # bring matches to the top (descending) or bottom (ascending).
+        match_item = _NumericItem(1 if matched else 0, "✓" if matched else "")
         match_item.setTextAlignment(Qt.AlignCenter)
         if matched:
             # Use the accent-orange so the winning row jumps out against both
@@ -417,16 +625,18 @@ class IntruderSession(QWidget):
             accent = QBrush(QColor("#ff7030"))
             match_item.setForeground(accent)
             for col in range(self._results.columnCount()):
-                cell = self._results.item(i, col)
+                cell = self._results.item(r, col)
                 if cell is not None and col != 2:
                     # Leave the status-code color alone; tint everything else.
                     cell.setForeground(accent)
-        self._results.setItem(i, 5, match_item)
+        self._results.setItem(r, 5, match_item)
 
         err = row.get("error")
         if err:
-            self._results.item(i, 2).setText("ERR")
-            self._results.item(i, 1).setToolTip(str(err))
+            self._results.item(r, 2).setText("ERR")
+            self._results.item(r, 1).setToolTip(str(err))
+
+        self._results.setSortingEnabled(True)
 
     def _on_done(self) -> None:
         # Drop the reference before the QThread's scheduled deleteLater fires;

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import proxy as proxy_module
+from .._build_check import StalenessReport, check_for_staleness
 
 
 def _icon_path() -> Optional[Path]:
@@ -51,6 +53,54 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _prompt_for_rebuild(staleness: StalenessReport) -> bool:
+    """
+    Show the stale-bundle dialog. Returns True if the user picked "Rebuild".
+
+    A QApplication must already exist when this is called.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle("MiniBurp bundle is out of date")
+    msg.setText(
+        f"This MiniBurp.app was built from {staleness.build_sha[:7]} "
+        f"on {staleness.build_time}."
+    )
+    msg.setInformativeText(
+        staleness.reason
+        + "\n\nRebuild now so the bundle picks up the latest source?"
+    )
+    # `&&` so Qt doesn't eat the '&' as a mnemonic.
+    rebuild_btn = msg.addButton("Rebuild && quit", QMessageBox.AcceptRole)
+    msg.addButton("Continue anyway", QMessageBox.RejectRole)
+    msg.setDefaultButton(rebuild_btn)
+    msg.exec()
+    return msg.clickedButton() is rebuild_btn
+
+
+def _spawn_rebuild(source_root: Path) -> None:
+    """Kick off `./build.sh --run` in the background and exit this process."""
+    script = source_root / "build.sh"
+    if not script.is_file():
+        # Shouldn't normally happen — find_source_repo verified the layout —
+        # but fall back gracefully so the user isn't stranded.
+        print(f"[bundle-check] {script} not found; rebuild manually.", file=sys.stderr)
+        return
+    try:
+        subprocess.Popen(
+            [str(script), "--run"],
+            cwd=str(source_root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        print(f"[bundle-check] failed to start {script}: {e}", file=sys.stderr)
+
+
 def run(
     host: str = "127.0.0.1",
     proxy_port: int = 8080,
@@ -63,13 +113,33 @@ def run(
 
     # PySide6 imports are deferred so --web mode can still run without Qt installed.
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 
     from .main_window import MainWindow
 
     app = QApplication(sys.argv if sys.argv else ["miniburp"])
     app.setApplicationName("MiniBurp")
     app.setOrganizationName("MiniBurp")
+    # Switch to Fusion app-wide so every widget honors our QSS. macOS's native
+    # painters ignore stylesheet rules on QTabBar, QComboBox popups, and parts
+    # of QToolBar — visible as the "dark patch beside Scope", the "black band
+    # in the dropdown", and the popup-above-button placement quirk. Fusion is
+    # the cross-platform style that respects QSS fully; MiniBurp is already
+    # so QSS-heavy that switching loses nothing native we were keeping.
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
+
+    # Detect a stale bundle: this .app was built before the source it lives
+    # next to. Quietly returns None when running from source, when the bundle
+    # has been copied away from its repo, or when MINIBURP_BUNDLE_CHECK=off.
+    staleness = check_for_staleness()
+    if staleness is not None:
+        if _prompt_for_rebuild(staleness):
+            # User chose to rebuild; spawn build.sh and exit so the new
+            # bundle can replace this one cleanly.
+            _spawn_rebuild(staleness.source_root)
+            return 0
 
     # Bind the proxy in the foreground so a port-in-use error surfaces to the
     # user instead of dying silently in a daemon thread (where stderr from a

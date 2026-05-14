@@ -17,6 +17,9 @@ env/
 build/
 dist/
 *.spec.bak
+# Generated per-build stamp consumed by miniburp/_build_check.py. Regenerated
+# each time build.sh runs; never commit.
+miniburp/_build_info.py
 
 # --- macOS ---
 .DS_Store

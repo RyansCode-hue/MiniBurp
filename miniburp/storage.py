@@ -35,6 +35,24 @@ class Transaction:
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
     error: Optional[str] = None
+    # Lazily-populated cache of the response body after gzip/deflate/brotli
+    # decoding. Used by the history search so a 'csrf-token' query matches
+    # gzipped responses too. Invalidated in Store.update when resp_body or
+    # resp_headers change.
+    _decoded_resp_body: Optional[bytes] = field(default=None, init=False, repr=False, compare=False)
+
+    def decoded_resp_body(self) -> bytes:
+        """Return the response body decoded if Content-Encoding says so.
+
+        Falls back to the raw bytes on decode failure or unknown encoding.
+        Memoized; cleared by Store.update when the body or headers change.
+        """
+        if self._decoded_resp_body is None:
+            # Imported lazily to keep storage.py free of decoder deps.
+            from .bodydecode import decode_body
+            decoded, _note = decode_body(self.resp_body, self.resp_headers)
+            self._decoded_resp_body = decoded
+        return self._decoded_resp_body
 
     @property
     def url(self) -> str:
@@ -111,6 +129,10 @@ class Store:
                 if tx.id == tx_id:
                     for k, v in kwargs.items():
                         setattr(tx, k, v)
+                    # If anything that feeds the decoded-body cache changed,
+                    # drop it so the next decoded_resp_body() call re-runs.
+                    if "resp_body" in kwargs or "resp_headers" in kwargs:
+                        tx._decoded_resp_body = None
                     self._publish({"kind": "update", "tx": tx.summary()})
                     return
 

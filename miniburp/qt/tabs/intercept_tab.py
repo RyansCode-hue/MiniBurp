@@ -56,6 +56,7 @@ class _HoldPane(QWidget):
 
         btn_row = QHBoxLayout()
         self._forward_btn = QPushButton("Forward", self)
+        self._forward_btn.setProperty("role", "primary")
         self._drop_btn = QPushButton("Drop", self)
         self._drop_btn.setProperty("role", "danger")
         btn_row.addWidget(self._forward_btn)
@@ -87,7 +88,9 @@ class InterceptTab(QWidget):
         # --- toolbar ---
         toolbar = QHBoxLayout()
         self._toggle_btn = QPushButton("Turn ON", self)
+        self._toggle_btn.setCheckable(True)
         self._forward_all_btn = QPushButton("Forward all", self)
+        self._forward_all_btn.setProperty("role", "primary")
         self._status_label = QLabel("Intercept: OFF", self)
         self._status_label.setProperty("role", "muted")
 
@@ -141,6 +144,13 @@ class InterceptTab(QWidget):
     def _refresh_status(self) -> None:
         on = INTERCEPT.is_enabled()
         self._toggle_btn.setText("Turn OFF" if on else "Turn ON")
+        # Keep the visual checked state in sync — Intercept can also be flipped
+        # from the main toolbar, so we mirror the model rather than relying on
+        # click-driven toggling alone.
+        if self._toggle_btn.isChecked() != on:
+            self._toggle_btn.blockSignals(True)
+            self._toggle_btn.setChecked(on)
+            self._toggle_btn.blockSignals(False)
         self._status_label.setText(
             f"Intercept: {'ON' if on else 'OFF'} · held: {len(self._panes)}"
         )

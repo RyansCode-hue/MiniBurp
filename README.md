@@ -39,9 +39,19 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt pyinstaller
 
-pyinstaller miniburp.spec --clean --noconfirm
-open dist/MiniBurp.app
+./build.sh --run
 ```
+
+`build.sh` always does a fully clean build (wipes `build/` + `dist/` and
+passes `--clean` to PyInstaller) and prints the source SHA it bundled, so
+you never end up launching stale bytecode after a code change. Add
+`--run` to launch the resulting `dist/MiniBurp.app` immediately.
+
+The bundle also self-checks at launch: if the `.app` lives next to its
+source repo and the source has moved on since the build, MiniBurp shows a
+**Rebuild and quit** prompt before opening the main window. Move the
+`.app` out of the repo (e.g. to `/Applications`) or set
+`MINIBURP_BUNDLE_CHECK=off` to silence it.
 
 That's it. The bundle that lands at `dist/MiniBurp.app` is a standalone
 macOS application — no Python required to run it after that point. Drag it
@@ -107,9 +117,9 @@ on first run; nothing in this repo carries CA material.
 
 | Tab | What it does |
 | --- | --- |
-| **Proxy** | Filterable history. Click any row to inspect the request / response, syntax-highlighted, with a hex toggle and Cmd-F find. Right-click → *Send to Repeater* / *Send to Intruder*. |
+| **Proxy** | Filterable history with full-text search across URL, raw request, raw response, and the decoded response body (so `csrf-token` matches gzipped pages). Optional regex. Click any row to inspect the request / response, syntax-highlighted, with a hex toggle and Cmd-F find. Right-click → *Send to Repeater* / *Send to Intruder*. |
 | **Intercept** | Pause requests, edit raw bytes, forward or drop. Toggle from the toolbar. |
-| **Repeater** | Multi-tab editable request + response. Send on demand. |
+| **Repeater** | Multi-tab editable request + response. Send on demand. Optional *Follow redirects* with standard HTTP semantics (301/302/303 → GET; 307/308 preserve method + body) and a minimal cookie jar so multi-hop login flows reach the final page; the hop chain is shown in the status bar. |
 | **Intruder** | 4 attack modes — Sniper, Battering-Ram, Pitchfork (lockstep lists), Cluster Bomb (cartesian product). Streams results into a live table. |
 | **Decoder** | Base64 / URL / hex / HTML-entity encode + decode. MD5 / SHA-1 / SHA-256 hashes. Chain output back to input. |
 | **Scope** | Glob allowlist (`*.web-security-academy.net`) for filtering history and intercept. |

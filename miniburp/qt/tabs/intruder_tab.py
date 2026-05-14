@@ -13,6 +13,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QTabBar,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...sender import send_raw
+from ... import bodydecode
+from ...sender import recompute_content_length, send_raw
 from ...storage import STORE
 from ..widgets.http_viewer import HttpEditor
 
@@ -91,29 +94,60 @@ class _AttackWorker(QThread):
         port: int,
         scheme: str,
         attempts: list[tuple[str, str]],
+        match_pattern: str = "",
+        match_regex: bool = False,
     ) -> None:
         super().__init__()
         self.host = host
         self.port = port
         self.scheme = scheme
         self.attempts = attempts
+        self.match_pattern = match_pattern
+        self.match_regex = match_regex
         self._abort = False
+
+        # Compile once. Invalid regex → no rows ever match; the UI will surface
+        # the syntax error next to the input so the user knows.
+        self._match_re: Optional[re.Pattern] = None
+        if match_pattern and match_regex:
+            try:
+                self._match_re = re.compile(match_pattern, re.IGNORECASE)
+            except re.error:
+                self._match_re = None
+        self._match_needle = match_pattern.lower()
 
     def abort(self) -> None:
         self._abort = True
+
+    def _scan_body(self, body: bytes, headers: dict) -> bool:
+        """True if `body` (after Content-Encoding decode) contains the pattern."""
+        if not self.match_pattern:
+            return False
+        decoded, _note = bodydecode.decode_body(body, headers or {})
+        if self.match_regex:
+            if self._match_re is None:
+                return False
+            text = decoded.decode("iso-8859-1", errors="replace")
+            return self._match_re.search(text) is not None
+        return self._match_needle.encode("utf-8", errors="ignore") in decoded.lower()
 
     def run(self) -> None:
         for i, (label, text) in enumerate(self.attempts):
             if self._abort:
                 break
             raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("iso-8859-1")
+            # Body length changes per attempt — recompute Content-Length so we
+            # don't ship truncated requests for every payload but the first.
+            raw = recompute_content_length(raw)
             r = send_raw(self.host, self.port, self.scheme, raw)
+            matched = self._scan_body(r.get("body", b""), r.get("headers") or {})
             self.result_ready.emit(i, {
                 "payload": label,
                 "status": r.get("status"),
                 "length": len(r.get("body", b"")),
                 "duration_ms": r.get("duration_ms", 0),
                 "error": r.get("error"),
+                "matched": matched,
             })
         self.all_done.emit()
 
@@ -162,6 +196,7 @@ class IntruderSession(QWidget):
         controls.addWidget(self._mode, 0, 7, 1, 2)
 
         self._start_btn = QPushButton("Start attack", self)
+        self._start_btn.setProperty("role", "primary")
         self._stop_btn = QPushButton("Stop", self)
         self._stop_btn.setEnabled(False)
         controls.addWidget(self._start_btn, 1, 7)
@@ -188,19 +223,48 @@ class IntruderSession(QWidget):
         left.setStretchFactor(0, 3)
         left.setStretchFactor(1, 2)
 
-        self._results = QTableWidget(0, 5, self)
-        self._results.setHorizontalHeaderLabels(["#", "Payload", "Status", "Length", "Time"])
+        # ---- match row + results, stacked on the right side ----
+        match_row = QHBoxLayout()
+        match_row.setSpacing(6)
+        match_row.addWidget(QLabel("Match:", self))
+        self._match_input = QLineEdit(self)
+        self._match_input.setPlaceholderText(
+            "Flag responses whose body contains this string (e.g. 'do not match')"
+        )
+        self._match_input.setClearButtonEnabled(True)
+        self._match_regex = QCheckBox("Regex", self)
+        self._match_status = QLabel("", self)
+        self._match_status.setProperty("role", "muted")
+        match_row.addWidget(self._match_input, 1)
+        match_row.addWidget(self._match_regex)
+        match_row.addWidget(self._match_status)
+
+        self._results = QTableWidget(0, 6, self)
+        self._results.setHorizontalHeaderLabels(["#", "Payload", "Status", "Length", "Time", "Match"])
         self._results.verticalHeader().setVisible(False)
-        self._results.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self._results.horizontalHeader().setStretchLastSection(True)
-        self._results.setColumnWidth(0, 50)
-        self._results.setColumnWidth(1, 260)
-        self._results.setColumnWidth(2, 60)
-        self._results.setColumnWidth(3, 80)
+        # Payload is the variable-width column; the rest get widths that fit
+        # both the data and the new uppercase-spaced headers.
+        header = self._results.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)  # Payload
+        self._results.setColumnWidth(0, 50)   # #
+        # col 1 (Payload) is stretched
+        self._results.setColumnWidth(2, 85)   # Status
+        self._results.setColumnWidth(3, 95)   # Length
+        self._results.setColumnWidth(4, 100)  # Time
+        self._results.setColumnWidth(5, 75)   # Match
+
+        right_wrap = QWidget(self)
+        right_layout = QVBoxLayout(right_wrap)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
+        right_layout.addLayout(match_row)
+        right_layout.addWidget(self._results, 1)
 
         split = QSplitter(Qt.Horizontal, self)
         split.addWidget(left)
-        split.addWidget(self._results)
+        split.addWidget(right_wrap)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 1)
 
@@ -214,8 +278,21 @@ class IntruderSession(QWidget):
         self._start_btn.clicked.connect(self._start)
         self._stop_btn.clicked.connect(self._stop)
         self._mode.currentIndexChanged.connect(self._rebuild_payload_panels)
+        self._match_input.textChanged.connect(self._update_match_status)
+        self._match_regex.toggled.connect(self._update_match_status)
 
         self._worker: Optional[_AttackWorker] = None
+
+    def _update_match_status(self) -> None:
+        text = self._match_input.text()
+        if not text or not self._match_regex.isChecked():
+            self._match_status.setText("")
+            return
+        try:
+            re.compile(text)
+            self._match_status.setText("")
+        except re.error as e:
+            self._match_status.setText(f"bad regex: {e}")
 
     # ---- payload panel reconcile ---------------------------------------
     def _rebuild_payload_panels(self) -> None:
@@ -289,6 +366,7 @@ class IntruderSession(QWidget):
             self._results.setItem(i, 2, QTableWidgetItem("…"))
             self._results.setItem(i, 3, QTableWidgetItem(""))
             self._results.setItem(i, 4, QTableWidgetItem(""))
+            self._results.setItem(i, 5, QTableWidgetItem(""))
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -298,6 +376,8 @@ class IntruderSession(QWidget):
             int(self._port.value()),
             self._scheme.currentText(),
             attempts,
+            match_pattern=self._match_input.text(),
+            match_regex=self._match_regex.isChecked(),
         )
         worker.result_ready.connect(self._on_result)
         worker.all_done.connect(self._on_done)
@@ -327,12 +407,31 @@ class IntruderSession(QWidget):
         self._results.setItem(i, 2, status_item)
         self._results.setItem(i, 3, QTableWidgetItem(str(row.get("length", 0))))
         self._results.setItem(i, 4, QTableWidgetItem(f"{row.get('duration_ms', 0)} ms"))
+
+        matched = bool(row.get("matched"))
+        match_item = QTableWidgetItem("✓" if matched else "")
+        match_item.setTextAlignment(Qt.AlignCenter)
+        if matched:
+            # Use the accent-orange so the winning row jumps out against both
+            # themes. Foreground only — Qt selection highlighting still works.
+            accent = QBrush(QColor("#ff7030"))
+            match_item.setForeground(accent)
+            for col in range(self._results.columnCount()):
+                cell = self._results.item(i, col)
+                if cell is not None and col != 2:
+                    # Leave the status-code color alone; tint everything else.
+                    cell.setForeground(accent)
+        self._results.setItem(i, 5, match_item)
+
         err = row.get("error")
         if err:
             self._results.item(i, 2).setText("ERR")
             self._results.item(i, 1).setToolTip(str(err))
 
     def _on_done(self) -> None:
+        # Drop the reference before the QThread's scheduled deleteLater fires;
+        # otherwise the next Start click sees a deleted C++ object.
+        self._worker = None
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
 
@@ -343,6 +442,7 @@ class IntruderSession(QWidget):
         self._results.setItem(0, 2, QTableWidgetItem("-"))
         self._results.setItem(0, 3, QTableWidgetItem("-"))
         self._results.setItem(0, 4, QTableWidgetItem("-"))
+        self._results.setItem(0, 5, QTableWidgetItem("-"))
 
 
 class IntruderTab(QWidget):
@@ -361,6 +461,12 @@ class IntruderTab(QWidget):
 
         self._tabs = QTabWidget(self)
         self._tabs.setTabsClosable(True)
+        # Same recipe as Repeater — flat, left-aligned session strip,
+        # plus the macOS WA_StyledBackground attr so the QTabBar's painter
+        # honors chrome_bg from QSS instead of falling through to window bg.
+        self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().setExpanding(False)
+        self._tabs.tabBar().setAttribute(Qt.WA_StyledBackground, True)
         self._tabs.tabCloseRequested.connect(self._close)
 
         root.addLayout(top)
@@ -398,5 +504,19 @@ class IntruderTab(QWidget):
         self._counter += 1
         title = label or f"Session {self._counter}"
         i = self._tabs.addTab(session, title)
+        # Same plain-× close button as Repeater; see that comment for why.
+        close_btn = QPushButton("×", self)
+        close_btn.setProperty("role", "tabClose")
+        close_btn.setFlat(True)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFocusPolicy(Qt.NoFocus)
+        close_btn.setFixedSize(18, 18)
+        close_btn.clicked.connect(lambda _checked=False, w=session: self._close_widget(w))
+        self._tabs.tabBar().setTabButton(i, QTabBar.RightSide, close_btn)
         self._tabs.setCurrentIndex(i)
         return session
+
+    def _close_widget(self, w: QWidget) -> None:
+        index = self._tabs.indexOf(w)
+        if index >= 0:
+            self._close(index)

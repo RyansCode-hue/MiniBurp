@@ -10,6 +10,7 @@ cheaply when the proxy captures new traffic.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -151,7 +152,33 @@ class _FilterModel(QSortFilterProxyModel):
         self.path_filter = ""     # substring
         self.status_filter = ""   # "", "2xx", "3xx", "4xx", "5xx"
         self.scope_only = True
+
+        # Full-text "search" — matches URL parts, raw request/response, and
+        # the decoded response body. Separate from the metadata filters above
+        # so the user can stack them ("4xx requests containing 'csrf'").
+        self.search_text = ""
+        self.search_regex = False
+        self._search_re: Optional[re.Pattern] = None
+        self._search_needle_bytes: bytes = b""
+
         self.setFilterKeyColumn(-1)
+
+    def set_search(self, text: str, use_regex: bool) -> None:
+        """Update the search criterion and reapply.
+
+        Empty text disables the search entirely. An invalid regex disables
+        the regex part (caller can show a hint) but the table is still usable.
+        """
+        self.search_text = text
+        self.search_regex = use_regex
+        self._search_re = None
+        self._search_needle_bytes = text.lower().encode("utf-8", errors="ignore")
+        if text and use_regex:
+            try:
+                self._search_re = re.compile(text, re.IGNORECASE)
+            except re.error:
+                self._search_re = None
+        self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:  # noqa: N802
         src = self.sourceModel()
@@ -175,7 +202,46 @@ class _FilterModel(QSortFilterProxyModel):
             host = row.get("host") or ""
             if host and not SCOPE.in_scope(host):
                 return False
+
+        if self.search_text:
+            tx_id = row.get("id")
+            tx = STORE.get(tx_id) if tx_id is not None else None
+            if tx is None:
+                return False
+            if not self._row_matches_search(tx):
+                return False
         return True
+
+    def _row_matches_search(self, tx) -> bool:
+        """Test a Transaction against the current search criterion."""
+        if self.search_regex:
+            if self._search_re is None:
+                # Regex mode with an invalid pattern: hide everything so the
+                # user notices their typo rather than getting silent results.
+                return False
+            haystacks_text = [
+                tx.host or "",
+                tx.path or "",
+                (tx.raw_request or b"").decode("iso-8859-1", errors="replace"),
+                (tx.raw_response or b"").decode("iso-8859-1", errors="replace"),
+                tx.decoded_resp_body().decode("iso-8859-1", errors="replace"),
+            ]
+            return any(self._search_re.search(s) for s in haystacks_text)
+
+        needle = self._search_needle_bytes
+        if not needle:
+            return True
+        if needle in (tx.host or "").lower().encode("utf-8", errors="ignore"):
+            return True
+        if needle in (tx.path or "").lower().encode("utf-8", errors="ignore"):
+            return True
+        if needle in (tx.raw_request or b"").lower():
+            return True
+        if needle in (tx.raw_response or b"").lower():
+            return True
+        if needle in tx.decoded_resp_body().lower():
+            return True
+        return False
 
 
 class ProxyTab(QWidget):
@@ -217,6 +283,33 @@ class ProxyTab(QWidget):
         filter_row.addStretch(1)
         filter_row.addWidget(self._clear_btn)
 
+        # ---- search row ----
+        # Sits below the filter row. Searches raw request bytes, raw response
+        # bytes, and the decoded response body — so a 'csrf-token' query hits
+        # gzipped responses too.
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        search_row.addWidget(QLabel("Search:", self))
+        self._search_edit = QLineEdit(self)
+        self._search_edit.setPlaceholderText(
+            "Substring across URL, request, response, decoded body…"
+        )
+        self._search_edit.setClearButtonEnabled(True)
+        # Cap the edit so Regex / status never slide off the right edge on
+        # narrow windows; keep a stretch factor so it still grows up to the
+        # max on wide ones.
+        self._search_edit.setMaximumWidth(480)
+        self._search_edit.setMinimumWidth(220)
+        self._regex_check = QCheckBox("Regex", self)
+        self._search_status = QLabel("", self)
+        self._search_status.setProperty("role", "muted")
+        search_row.addWidget(self._search_edit, 1)
+        search_row.addWidget(self._regex_check)
+        search_row.addWidget(self._search_status)
+        # Soak up the slack on wide windows so the row reads left-aligned
+        # instead of stretching the edit + status across the whole pane.
+        search_row.addStretch(1)
+
         # ---- table ----
         self._source = _HistoryModel(self)
         self._filter = _FilterModel(self)
@@ -227,15 +320,22 @@ class ProxyTab(QWidget):
         self._table.setSelectionMode(QTableView.SingleSelection)
         self._table.setEditTriggers(QTableView.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setShowGrid(False)
         self._table.setAlternatingRowColors(True)
-        self._table.setColumnWidth(0, 60)
-        self._table.setColumnWidth(1, 70)
-        self._table.setColumnWidth(2, 220)
-        self._table.setColumnWidth(4, 60)
-        self._table.setColumnWidth(5, 70)
+        # All columns user-resizable. Path is the one that benefits from
+        # stretching since URLs vary wildly; the rest get explicit widths
+        # sized for the new uppercase-spaced header glyphs.
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)  # Path
+        self._table.setColumnWidth(0, 50)   # #
+        self._table.setColumnWidth(1, 90)   # Method
+        self._table.setColumnWidth(2, 260)  # Host
+        # col 3 (Path) is stretched
+        self._table.setColumnWidth(4, 85)   # Status
+        self._table.setColumnWidth(5, 95)   # Length
+        self._table.setColumnWidth(6, 100)  # Time
 
         # ---- detail splitter ----
         self._req_viewer = HttpViewer("Request", editable=False, parent=self)
@@ -263,6 +363,7 @@ class ProxyTab(QWidget):
         top_layout = QVBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.addLayout(filter_row)
+        top_layout.addLayout(search_row)
         top_layout.addWidget(self._table, 1)
         top_layout.addLayout(action_row)
         self._main_splitter.addWidget(top_widget)
@@ -282,6 +383,8 @@ class ProxyTab(QWidget):
         self._host_edit.textChanged.connect(self._apply_filters)
         self._path_edit.textChanged.connect(self._apply_filters)
         self._scope_check.toggled.connect(self._apply_filters)
+        self._search_edit.textChanged.connect(self._apply_search)
+        self._regex_check.toggled.connect(self._apply_search)
         self._clear_btn.clicked.connect(STORE.clear)
 
         self._table.selectionModel().currentRowChanged.connect(self._on_row_changed)
@@ -298,6 +401,20 @@ class ProxyTab(QWidget):
         self._filter.path_filter = self._path_edit.text()
         self._filter.scope_only = self._scope_check.isChecked()
         self._filter.invalidateFilter()
+
+    def _apply_search(self) -> None:
+        text = self._search_edit.text()
+        use_regex = self._regex_check.isChecked()
+        self._filter.set_search(text, use_regex)
+        # Surface a hint when the user types an invalid regex; otherwise quiet.
+        if text and use_regex:
+            try:
+                re.compile(text)
+                self._search_status.setText("")
+            except re.error as e:
+                self._search_status.setText(f"bad regex: {e}")
+        else:
+            self._search_status.setText("")
 
     def _on_updated(self, summary: dict) -> None:
         self._source.update_tx(summary)

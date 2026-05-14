@@ -85,7 +85,7 @@ QTabWidget::pane {{
  * instead of the chrome bg — visible as an unstyled patch in light mode.
  * Applies to nested QTabWidgets too (Repeater / Intruder session bars)
  * which have exactly the same painter quirk on macOS. */
-QTabWidget {{ background: {chrome_bg}; }}
+QTabWidget {{ background: {chrome_bg}; border: 0; }}
 QTabBar {{ background: {chrome_bg}; }}
 QTabBar::tab {{
     background: {chrome_bg};
@@ -664,6 +664,30 @@ class MainWindow(QMainWindow):
         # grays. Without this you see thin "random black lines" wherever
         # Fusion draws on top of the QSS background.
         self._apply_palette(_DARK if name == "dark" else _LIGHT)
+        # The HTTP syntax highlighter caches its colors on construction —
+        # walk every HttpViewer/HttpEditor and re-stain it for the new
+        # theme. Without this the request body text stays at the dark-mode
+        # near-white colour and reads as invisible on the light surface.
+        from .widgets.http_viewer import HttpViewer
+        from PySide6.QtWidgets import QApplication
+        qapp = QApplication.instance()
+        if qapp is not None:
+            for w in qapp.allWidgets():
+                if isinstance(w, HttpViewer):
+                    w.refresh_highlight_theme()
+            # Force every widget to re-polish and repaint with the new
+            # palette + stylesheet. Qt's PaletteChange event reaches all
+            # widgets, but Fusion's PE_FrameTabWidget primitive caches the
+            # frame it painted using the previous palette. Without this
+            # re-polish the cached `border`-coloured frame reappears as a
+            # stripe on every theme toggle, even though the palette change
+            # itself looks correct.
+            for w in qapp.allWidgets():
+                style = w.style()
+                if style is not None:
+                    style.unpolish(w)
+                    style.polish(w)
+                w.update()
         self._theme_action.setText(self._theme_action_label())
         self._settings.setValue("theme", name)
 
@@ -688,14 +712,21 @@ class MainWindow(QMainWindow):
         # Tooltips
         p.setColor(QPalette.ToolTipBase, c("chrome_bg"))
         p.setColor(QPalette.ToolTipText, c("fg"))
-        # Frame / border roles — the main reason this method exists. Fusion
-        # paints sunken frames using Mid + Dark + Shadow. Putting our border
-        # colors here eliminates the "thin black line" artifacts.
+        # Frame / border roles. Fusion's PE_FrameTabWidget primitive uses
+        # QPalette.Mid + QPalette.Shadow to paint a 1px frame around the tab
+        # pane — that's the stripe the user sees right at the bar→pane
+        # boundary (tabs cover it where they sit, it's visible in the gap
+        # right of the last tab and across the session-tab strips). Setting
+        # Mid + Shadow to chrome_bg means Fusion still paints, but the line
+        # colour matches the surface beneath and is invisible.
+        # QSS-driven borders use literal `{border}` from the format string,
+        # not the palette, so splitter handles / table outlines / toolbar
+        # bottom etc. stay sharp.
         p.setColor(QPalette.Light, c("chrome_bg"))
         p.setColor(QPalette.Midlight, c("chrome_bg"))
-        p.setColor(QPalette.Mid, c("border"))
+        p.setColor(QPalette.Mid, c("chrome_bg"))
         p.setColor(QPalette.Dark, c("border_strong"))
-        p.setColor(QPalette.Shadow, c("border"))
+        p.setColor(QPalette.Shadow, c("chrome_bg"))
         # Selection / accent
         p.setColor(QPalette.Highlight, c("accent"))
         p.setColor(QPalette.HighlightedText, c("accent_fg"))

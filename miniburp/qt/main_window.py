@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSettings, QSize, QTimer, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor, QPalette
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -54,125 +54,443 @@ from .tabs.scope_tab import ScopeTab
 # and add a matching rule below.
 
 _QSS_TEMPLATE = """
-QMainWindow, QWidget {{ background: {bg}; color: {fg}; }}
+/* ---- base typography & surface --------------------------------------- */
+QMainWindow, QWidget {{
+    background: {bg};
+    color: {fg};
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
+    font-size: 12px;
+}}
 
-QTabWidget::pane {{ border-top: 1px solid {border}; }}
+/* ---- tabs -------------------------------------------------------------
+ * Flat strip, accent underline on the active tab. macOS's QTabBar native
+ * painter ignores `QTabBar` background set from QSS, so we set it on the
+ * tabs themselves and let the selected one switch to the content bg —
+ * that's what makes the selected tab visually "connect" to the pane below.
+ */
+QTabWidget::pane {{
+    border: 0;
+    /* Pane bg is chrome_bg, not the window bg, so the strip right of the
+     * last tab paints the same color as the bar instead of leaking the
+     * content bg (which renders as a white line in light mode, black in
+     * dark mode). The actual tab content widgets are QWidget instances
+     * carrying `background: bg` from the global rule above, so the visible
+     * content area is still bg — only the otherwise-empty sliver matches
+     * the chrome strip.
+     */
+    background: {chrome_bg};
+}}
+/* The empty strip to the right of the last tab falls through to the
+ * QTabWidget's own bg. Without this rule that strip leaks the window bg
+ * instead of the chrome bg — visible as an unstyled patch in light mode.
+ * Applies to nested QTabWidgets too (Repeater / Intruder session bars)
+ * which have exactly the same painter quirk on macOS. */
+QTabWidget {{ background: {chrome_bg}; }}
+QTabBar {{ background: {chrome_bg}; }}
 QTabBar::tab {{
-    background: {chrome_bg}; color: {fg_muted}; padding: 6px 14px; border: 0;
-    border-right: 1px solid {border}; font-weight: 600;
+    background: {chrome_bg};
+    color: {fg_muted};
+    padding: 9px 20px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    font-weight: 500;
+    margin: 0;
+}}
+QTabBar::tab:hover {{
+    color: {fg};
+    background: {chrome_bg};
 }}
 QTabBar::tab:selected {{
-    color: {accent}; background: {bg}; border-bottom: 2px solid {accent};
+    color: {fg};
+    background: {bg};
+    border-bottom: 2px solid {accent};
 }}
-QTabBar::tab:hover {{ color: {fg}; }}
 
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
-    background: {input_bg}; color: {fg}; border: 1px solid {border};
-    border-radius: 4px; padding: 4px 6px;
-    selection-background-color: {accent}; selection-color: {accent_fg};
-}}
-QPlainTextEdit, QTextEdit {{ padding: 6px; }}
-
+/* ---- buttons: three-tier hierarchy ----------------------------------
+ * Default is a ghost button. role="primary" gets the accent fill; reserve
+ * for Send / Start attack / Forward. role="danger" stays restrained — a
+ * tinted bg with red text — and saturates only on hover so destructive
+ * intent is clearly signalled at click time.
+ */
 QPushButton {{
-    background: {accent}; color: {accent_fg}; border: 0; padding: 6px 14px;
-    border-radius: 4px; font-weight: 600;
+    background: {surface};
+    color: {fg};
+    border: 1px solid {border};
+    padding: 6px 14px;
+    border-radius: 5px;
+    font-weight: 500;
 }}
-QPushButton:hover {{ background: {accent_hover}; }}
-QPushButton:disabled {{ background: {disabled_bg}; color: {fg_muted}; }}
+QPushButton:hover {{
+    background: {chrome_bg};
+    border-color: {border_strong};
+}}
+QPushButton:pressed {{
+    background: {border};
+}}
+QPushButton:focus {{
+    border-color: {accent};
+}}
+QPushButton:disabled {{
+    color: {fg_subtle};
+    background: {surface};
+    border-color: {border};
+}}
 
-/* "Drop" / destructive button uses a red accent. */
-QPushButton[role="danger"] {{ background: {err}; color: #ffffff; }}
-QPushButton[role="danger"]:hover {{ background: {err_hover}; }}
+QPushButton[role="primary"] {{
+    background: {accent};
+    color: {accent_fg};
+    border: 1px solid {accent};
+    font-weight: 600;
+}}
+QPushButton[role="primary"]:hover {{
+    background: {accent_hover};
+    border-color: {accent_hover};
+}}
+QPushButton[role="primary"]:pressed {{
+    background: {accent_pressed};
+    border-color: {accent_pressed};
+}}
+QPushButton[role="primary"]:disabled {{
+    background: {accent_disabled};
+    border-color: {accent_disabled};
+    color: {accent_fg};
+}}
 
+QPushButton[role="danger"] {{
+    background: {err_subtle};
+    color: {err};
+    border: 1px solid {err_border};
+}}
+QPushButton[role="danger"]:hover {{
+    background: {err};
+    color: #ffffff;
+    border-color: {err};
+}}
+
+/* ---- checkable buttons (Repeater Follow redirects, etc.) ------------- */
+QPushButton:checked {{
+    background: {accent_subtle};
+    color: {accent};
+    border-color: {accent_border};
+}}
+
+/* ---- session-tab close button: plain × that matches the tab text ----
+ * Used by Repeater/Intruder session tabs in place of the default macOS
+ * close glyph. Borderless on the chrome strip, shifts from fg_muted →
+ * fg on hover so the affordance is obvious without being shouty.
+ */
+QPushButton[role="tabClose"] {{
+    background: transparent;
+    color: {fg_muted};
+    border: 0;
+    padding: 0;
+    margin: 0 4px 0 2px;
+    font-size: 16px;
+    font-weight: 400;
+    qproperty-flat: true;
+}}
+QPushButton[role="tabClose"]:hover {{
+    color: {fg};
+    background: transparent;
+    border: 0;
+}}
+QPushButton[role="tabClose"]:pressed {{
+    color: {fg};
+    background: transparent;
+}}
+QPushButton[role="tabClose"]:focus {{
+    border: 0;
+}}
+
+/* ---- toolbar: chrome-strip styling, no slab buttons ------------------ */
+QToolBar {{
+    background: {chrome_bg};
+    border-bottom: 1px solid {border};
+    padding: 6px 10px;
+    spacing: 4px;
+}}
+QToolBar QToolButton {{
+    background: transparent;
+    color: {fg};
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 5px 11px;
+    font-weight: 500;
+}}
+QToolBar QToolButton:hover {{
+    background: {surface};
+    border-color: {border};
+}}
+QToolBar QToolButton:pressed {{
+    background: {border};
+}}
+QToolBar QToolButton:checked {{
+    background: {accent_subtle};
+    color: {accent};
+    border-color: {accent_border};
+}}
+QToolBar::separator {{
+    background: {border};
+    width: 1px;
+    margin: 6px 6px;
+}}
+
+/* ---- inputs ---------------------------------------------------------- */
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
+    background: {surface};
+    color: {fg};
+    border: 1px solid {border};
+    border-radius: 5px;
+    padding: 5px 10px;
+    selection-background-color: {accent};
+    selection-color: {accent_fg};
+}}
+QLineEdit {{ placeholder-text-color: {fg_subtle}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+QPlainTextEdit:focus, QTextEdit:focus {{
+    border-color: {accent};
+}}
+QPlainTextEdit, QTextEdit {{ padding: 8px; }}
+
+QComboBox::drop-down {{ border: 0; width: 22px; }}
+QComboBox QAbstractItemView {{
+    background: {surface};
+    color: {fg};
+    border: 1px solid {border_strong};
+    border-radius: 5px;
+    selection-background-color: {accent_subtle};
+    selection-color: {accent};
+    outline: 0;
+    padding: 4px;
+}}
+QComboBox QAbstractItemView::item {{
+    padding: 6px 12px;
+    min-height: 22px;
+    border-radius: 3px;
+    color: {fg};
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background: {chrome_bg};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background: {accent_subtle};
+    color: {accent};
+}}
+
+QSpinBox::up-button, QSpinBox::down-button {{
+    width: 16px;
+    border: 0;
+    background: transparent;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+    background: {chrome_bg};
+}}
+
+/* ---- tables & lists -------------------------------------------------- */
 QTableView, QTableWidget, QListWidget {{
-    background: {bg}; color: {fg}; alternate-background-color: {row_alt};
-    gridline-color: {border}; border: 1px solid {border};
-    selection-background-color: {accent}; selection-color: {accent_fg};
+    background: {bg};
+    color: {fg};
+    alternate-background-color: {row_alt};
+    gridline-color: {border};
+    border: 1px solid {border};
+    border-radius: 5px;
+    selection-background-color: {accent_subtle};
+    selection-color: {accent};
+}}
+QTableView::item, QTableWidget::item, QListWidget::item {{
+    padding: 4px 6px;
 }}
 QHeaderView::section {{
-    background: {chrome_bg}; color: {fg_muted}; padding: 4px 8px; border: 0;
-    border-right: 1px solid {border}; font-weight: 600; font-size: 11px;
-    text-transform: uppercase; letter-spacing: 0.5px;
+    background: {chrome_bg};
+    color: {fg_muted};
+    padding: 8px 12px;
+    border: 0;
+    border-right: 1px solid {border};
+    border-bottom: 1px solid {border};
+    font-weight: 500;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+}}
+/* Drop the rightmost divider so it doesn't double up with the table's
+ * own right border. The visible per-column divider is the grab cue
+ * for resizing — every header in MiniBurp uses Interactive mode. */
+QHeaderView::section:last {{
+    border-right: 0;
 }}
 
-QToolBar {{
-    background: {chrome_bg}; border-bottom: 1px solid {border};
-    spacing: 6px; padding: 4px 8px;
-}}
+/* ---- status bar ------------------------------------------------------ */
 QStatusBar {{
-    background: {chrome_bg}; border-top: 1px solid {border}; color: {fg_muted};
+    background: {chrome_bg};
+    border-top: 1px solid {border};
+    color: {fg_muted};
+    padding: 4px 12px;
+}}
+QStatusBar::item {{ border: 0; }}
+
+/* ---- splitters: thin lines, accent on hover for grab affordance ----- */
+QSplitter::handle {{ background: {border}; }}
+QSplitter::handle:horizontal {{ width: 1px; margin: 0 3px; }}
+QSplitter::handle:vertical   {{ height: 1px; margin: 3px 0; }}
+QSplitter::handle:hover {{ background: {accent}; }}
+
+/* ---- checkboxes ------------------------------------------------------ */
+QCheckBox {{ color: {fg}; spacing: 6px; }}
+QCheckBox::indicator {{
+    width: 14px; height: 14px;
+    border: 1px solid {border_strong};
+    border-radius: 3px;
+    background: {surface};
+}}
+QCheckBox::indicator:hover {{ border-color: {accent}; }}
+QCheckBox::indicator:checked {{
+    background: {accent};
+    border-color: {accent};
 }}
 
-QSplitter::handle {{ background: {border}; }}
-QSplitter::handle:horizontal {{ width: 2px; }}
-QSplitter::handle:vertical {{ height: 2px; }}
-
-QCheckBox {{ color: {fg}; }}
+/* ---- labels & semantic roles ---------------------------------------- */
 QLabel {{ color: {fg}; }}
-
-/* Semantic label styles -- driven by `setProperty("role", ...)`. */
 QLabel[role="muted"]   {{ color: {fg_muted}; }}
 QLabel[role="ok"]      {{ color: {ok}; }}
 QLabel[role="warn"]    {{ color: {warn}; }}
 QLabel[role="err"]     {{ color: {err}; }}
 QLabel[role="section"] {{
-    color: {fg_muted}; font-size: 11px; font-weight: 600;
-    letter-spacing: 0.5px;
+    color: {fg_muted};
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
 }}
-QLabel[role="title"]   {{ font-weight: 600; }}
+QLabel[role="title"]   {{ font-weight: 600; font-size: 13px; }}
 
-/* The proxy/chrome status pills in the toolbar. State drives the color. */
-QLabel#proxyIndicator                    {{ color: {ok};        padding: 0 10px; }}
-QLabel#chromeIndicator[state="off"]      {{ color: {fg_muted};  padding: 0 10px; }}
-QLabel#chromeIndicator[state="on"]       {{ color: {ok};        padding: 0 10px; }}
-QLabel#chromeIndicator[state="exited"]   {{ color: {warn};      padding: 0 10px; }}
+/* ---- status pills in the toolbar ----------------------------------- */
+QLabel#proxyIndicator {{
+    color: {ok};
+    background: {ok_subtle};
+    border: 1px solid {ok_border};
+    border-radius: 10px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 500;
+}}
+QLabel#chromeIndicator {{
+    border-radius: 10px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 500;
+    border: 1px solid {border};
+    background: {surface};
+}}
+QLabel#chromeIndicator[state="off"] {{
+    color: {fg_muted};
+    background: {surface};
+    border-color: {border};
+}}
+QLabel#chromeIndicator[state="on"] {{
+    color: {ok};
+    background: {ok_subtle};
+    border-color: {ok_border};
+}}
+QLabel#chromeIndicator[state="exited"] {{
+    color: {warn};
+    background: {warn_subtle};
+    border-color: {warn_border};
+}}
 
-QScrollBar:vertical {{ background: {bg}; width: 12px; }}
-QScrollBar::handle:vertical {{ background: {border}; border-radius: 4px; min-height: 30px; }}
-QScrollBar::handle:vertical:hover {{ background: {scroll_hover}; }}
-QScrollBar:horizontal {{ background: {bg}; height: 12px; }}
-QScrollBar::handle:horizontal {{ background: {border}; border-radius: 4px; min-width: 30px; }}
+/* ---- scrollbars: thin, transparent track, accent-grab on hover ----- */
+QScrollBar:vertical, QScrollBar:horizontal {{
+    background: transparent;
+    border: 0;
+}}
+QScrollBar:vertical {{ width: 10px; }}
+QScrollBar:horizontal {{ height: 10px; }}
+QScrollBar::handle {{
+    background: {border_strong};
+    border-radius: 4px;
+    margin: 2px;
+    min-height: 30px;
+    min-width: 30px;
+}}
+QScrollBar::handle:hover {{ background: {scroll_hover}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{
-    background: none; border: none; width: 0; height: 0;
+    background: none; border: 0; width: 0; height: 0;
 }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+/* ---- tooltips ------------------------------------------------------- */
+QToolTip {{
+    background: {chrome_bg};
+    color: {fg};
+    border: 1px solid {border_strong};
+    padding: 5px 9px;
+    border-radius: 4px;
+}}
+
+/* ---- group boxes / message boxes ----------------------------------- */
+QMessageBox {{ background: {surface}; }}
 """
 
+# Dark palette: deep, slightly warm (away from pure-blue cast). The orange
+# accent reads cleaner on a warm bg than on the previous cool-tinted gray.
 _DARK = {
-    "bg":            "#1b1b1f",
-    "chrome_bg":     "#24242b",
-    "input_bg":      "#24242b",
-    "row_alt":       "#20202a",
-    "border":        "#353540",
-    "fg":            "#e8e8ec",
-    "fg_muted":      "#9a9aa8",
-    "accent":        "#ff7030",
-    "accent_hover":  "#ff8450",
-    "accent_fg":     "#1b1b1f",
-    "disabled_bg":   "#3a3a44",
-    "ok":            "#5ecb7b",
-    "warn":          "#e7b648",
-    "err":           "#ef6767",
-    "err_hover":     "#f48989",
-    "scroll_hover":  "#4a4a58",
+    "bg":               "#16161a",
+    "surface":          "#1c1c20",
+    "chrome_bg":        "#1f1f24",
+    "row_alt":          "#1a1a1e",
+    "border":           "#2a2a30",
+    "border_strong":    "#3a3a44",
+    "fg":               "#ebebed",
+    "fg_muted":         "#8b8b93",
+    "fg_subtle":        "#5a5a62",
+    "accent":           "#ff7d3d",
+    "accent_hover":     "#ff9258",
+    "accent_pressed":   "#e86a2e",
+    "accent_fg":        "#1a1208",
+    "accent_subtle":    "#2a1d12",
+    "accent_border":    "#4a2f1c",
+    "accent_disabled":  "#4a3527",
+    "ok":               "#5dcc7c",
+    "ok_subtle":        "#1b2a1f",
+    "ok_border":        "#2e4a37",
+    "warn":             "#e8b94a",
+    "warn_subtle":      "#2a2114",
+    "warn_border":      "#4a3b1f",
+    "err":              "#ef6868",
+    "err_subtle":       "#2a1818",
+    "err_border":       "#4a2828",
+    "scroll_hover":     "#5a5a64",
 }
 
+# Light palette: warm off-white instead of bluish white. Less contrast-y
+# than pure black-on-white; the slight warmth pairs with the deepened
+# orange so neither feels stranded.
 _LIGHT = {
-    "bg":            "#fafafc",
-    "chrome_bg":     "#ececf0",
-    "input_bg":      "#ffffff",
-    "row_alt":       "#f3f3f7",
-    "border":        "#d3d3da",
-    "fg":            "#1b1b1f",
-    "fg_muted":      "#6c6c78",
-    "accent":        "#ff7030",
-    "accent_hover":  "#ff8450",
-    "accent_fg":     "#ffffff",
-    "disabled_bg":   "#dcdce2",
-    "ok":            "#1f9d4f",
-    "warn":          "#a8761a",
-    "err":           "#c93030",
-    "err_hover":     "#dd4848",
-    "scroll_hover":  "#bcbcc4",
+    "bg":               "#fbfbf7",
+    "surface":          "#ffffff",
+    "chrome_bg":        "#f1f0eb",
+    "row_alt":          "#f6f5ef",
+    "border":           "#e4e2dc",
+    "border_strong":    "#ccc9c0",
+    "fg":               "#1a1a1d",
+    "fg_muted":         "#6a6a72",
+    "fg_subtle":        "#9c9ca4",
+    "accent":           "#e85a1f",
+    "accent_hover":     "#cd4d15",
+    "accent_pressed":   "#b04210",
+    "accent_fg":        "#ffffff",
+    "accent_subtle":    "#fff0e6",
+    "accent_border":    "#f5cab0",
+    "accent_disabled":  "#f0b89a",
+    "ok":               "#1c9c4d",
+    "ok_subtle":        "#e9f6ed",
+    "ok_border":        "#bbe0c5",
+    "warn":             "#9a6b14",
+    "warn_subtle":      "#fbf2db",
+    "warn_border":      "#e6d4a0",
+    "err":              "#c93030",
+    "err_subtle":       "#fbe9e9",
+    "err_border":       "#e8c0c0",
+    "scroll_hover":     "#a8a8b0",
 }
 
 THEMES = {
@@ -232,6 +550,12 @@ class MainWindow(QMainWindow):
         self._clear_action = QAction("Clear history", self)
         self._save_ca_action = QAction("Save CA…", self)
         self._theme_action = QAction(self._theme_action_label(), self)
+        # Qt auto-derives a tooltip from QAction.text() and shows it on
+        # hover in the toolbar. With the text already visible on the button
+        # the tooltip just duplicates it — kill them.
+        for act in (self._launch_action, self._intercept_action,
+                    self._clear_action, self._save_ca_action, self._theme_action):
+            act.setToolTip("")
 
         tb.addAction(self._launch_action)
         tb.addAction(self._intercept_action)
@@ -257,6 +581,10 @@ class MainWindow(QMainWindow):
         # ---- tabs ----
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        # macOS's native QTabBar painter ignores QSS background; this attr
+        # makes it honor the chrome_bg rule so the strip right of the last
+        # tab matches the theme instead of inheriting the window bg.
+        self._tabs.tabBar().setAttribute(Qt.WA_StyledBackground, True)
 
         self.proxy_tab = ProxyTab(self._bridge, self)
         self.intercept_tab = InterceptTab(self._bridge, self)
@@ -293,6 +621,8 @@ class MainWindow(QMainWindow):
         self._bridge.added.connect(self._on_added)
 
         # Apply the saved theme once everything is wired up.
+        # Fusion-app-wide is set in qt/app.py::run so QSS is honored across
+        # the board — this widget just inherits that.
         self._apply_theme(self._theme)
 
         # Poll Chrome process every 1.5s and update intercept badge.
@@ -305,6 +635,10 @@ class MainWindow(QMainWindow):
         """Expanding spacer for the toolbar — pushes whatever follows to the right."""
         w = QWidget(self)
         w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # Without this the global `QWidget { background: bg; }` rule paints
+        # the spacer in content-bg, which shows as a coloured band cutting
+        # through the toolbar between Save CA and the status indicators.
+        w.setStyleSheet("background: transparent;")
         return w
 
     def _theme_action_label(self) -> str:
@@ -324,8 +658,54 @@ class MainWindow(QMainWindow):
             name = DEFAULT_THEME
         self._theme = name
         self.setStyleSheet(THEMES[name])
+        # Push our colors into the QApplication palette so Fusion's native
+        # painters (tab-strip separator line, sunken QFrame borders, the
+        # splitter shadow, etc.) use them instead of Fusion's default dark
+        # grays. Without this you see thin "random black lines" wherever
+        # Fusion draws on top of the QSS background.
+        self._apply_palette(_DARK if name == "dark" else _LIGHT)
         self._theme_action.setText(self._theme_action_label())
         self._settings.setValue("theme", name)
+
+    def _apply_palette(self, palette_dict: dict[str, str]) -> None:
+        from PySide6.QtWidgets import QApplication
+        qapp = QApplication.instance()
+        if qapp is None:
+            return
+        c = lambda key: QColor(palette_dict[key])
+        p = QPalette()
+        # Window / surface
+        p.setColor(QPalette.Window, c("bg"))
+        p.setColor(QPalette.WindowText, c("fg"))
+        p.setColor(QPalette.Base, c("surface"))
+        p.setColor(QPalette.AlternateBase, c("row_alt"))
+        p.setColor(QPalette.Text, c("fg"))
+        p.setColor(QPalette.BrightText, c("fg"))
+        p.setColor(QPalette.PlaceholderText, c("fg_subtle"))
+        # Buttons (Fusion uses these for button gradients underneath QSS)
+        p.setColor(QPalette.Button, c("surface"))
+        p.setColor(QPalette.ButtonText, c("fg"))
+        # Tooltips
+        p.setColor(QPalette.ToolTipBase, c("chrome_bg"))
+        p.setColor(QPalette.ToolTipText, c("fg"))
+        # Frame / border roles — the main reason this method exists. Fusion
+        # paints sunken frames using Mid + Dark + Shadow. Putting our border
+        # colors here eliminates the "thin black line" artifacts.
+        p.setColor(QPalette.Light, c("chrome_bg"))
+        p.setColor(QPalette.Midlight, c("chrome_bg"))
+        p.setColor(QPalette.Mid, c("border"))
+        p.setColor(QPalette.Dark, c("border_strong"))
+        p.setColor(QPalette.Shadow, c("border"))
+        # Selection / accent
+        p.setColor(QPalette.Highlight, c("accent"))
+        p.setColor(QPalette.HighlightedText, c("accent_fg"))
+        p.setColor(QPalette.Link, c("accent"))
+        p.setColor(QPalette.LinkVisited, c("accent_pressed"))
+        # Disabled overrides — dimmer everything when widgets are disabled
+        p.setColor(QPalette.Disabled, QPalette.WindowText, c("fg_subtle"))
+        p.setColor(QPalette.Disabled, QPalette.Text, c("fg_subtle"))
+        p.setColor(QPalette.Disabled, QPalette.ButtonText, c("fg_subtle"))
+        qapp.setPalette(p)
 
     def _toggle_theme(self) -> None:
         self._apply_theme("light" if self._theme == "dark" else "dark")

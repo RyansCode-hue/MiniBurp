@@ -84,7 +84,11 @@ class HttpViewer(QWidget):
         self._title_label.setProperty("role", "section")
         self._hex_btn = QPushButton("Hex", self)
         self._hex_btn.setCheckable(True)
-        self._hex_btn.setFixedWidth(48)
+        # Don't fix the width — at the previous 48px the text clipped on macOS
+        # because button padding (14px each side) + "Hex" glyph width exceeded
+        # the budget. Letting QSS padding determine the size keeps it honest
+        # across themes / fonts / DPI.
+        self._hex_btn.setMinimumWidth(56)
         self._hex_btn.toggled.connect(self._set_hex_mode)
 
         header.addWidget(self._title_label, 1)

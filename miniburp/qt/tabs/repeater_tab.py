@@ -10,6 +10,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -17,13 +18,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ... import bodydecode
-from ...sender import send_raw
+from ...sender import send_raw, send_with_redirects
 from ...storage import STORE
 from ..widgets.http_viewer import HttpEditor, HttpViewer
 
@@ -33,15 +35,31 @@ class _SendWorker(QThread):
 
     finished_with = Signal(dict)
 
-    def __init__(self, host: str, port: int, scheme: str, raw: bytes) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        scheme: str,
+        raw: bytes,
+        follow_redirects: bool = False,
+        max_redirects: int = 10,
+    ) -> None:
         super().__init__()
         self.host = host
         self.port = port
         self.scheme = scheme
         self.raw = raw
+        self.follow_redirects = follow_redirects
+        self.max_redirects = max_redirects
 
     def run(self) -> None:
-        result = send_raw(self.host, self.port, self.scheme, self.raw)
+        if self.follow_redirects:
+            result = send_with_redirects(
+                self.host, self.port, self.scheme, self.raw,
+                max_redirects=self.max_redirects,
+            )
+        else:
+            result = send_raw(self.host, self.port, self.scheme, self.raw)
         self.finished_with.emit(result)
 
 
@@ -80,7 +98,23 @@ class RepeaterSession(QWidget):
         self._port.setValue(port)
         target_row.addWidget(self._port)
 
+        self._follow_check = QCheckBox("Follow redirects", self)
+        self._follow_check.setToolTip(
+            "Re-send the request for any 3xx response and show the final hop.\n"
+            "301/302/303 rewrite to GET; 307/308 preserve the method and body."
+        )
+        target_row.addWidget(self._follow_check)
+
+        target_row.addWidget(QLabel("Max:", self))
+        self._max_redirects = QSpinBox(self)
+        self._max_redirects.setRange(1, 20)
+        self._max_redirects.setValue(10)
+        self._max_redirects.setEnabled(False)
+        self._follow_check.toggled.connect(self._max_redirects.setEnabled)
+        target_row.addWidget(self._max_redirects)
+
         self._send_btn = QPushButton("Send", self)
+        self._send_btn.setProperty("role", "primary")
         self._send_btn.setMinimumWidth(90)
         target_row.addWidget(self._send_btn)
 
@@ -115,6 +149,8 @@ class RepeaterSession(QWidget):
             int(self._port.value()),
             self._scheme.currentText(),
             self._req_editor.bytes_value(),
+            follow_redirects=self._follow_check.isChecked(),
+            max_redirects=int(self._max_redirects.value()),
         )
         worker.finished_with.connect(self._on_response)
         worker.finished.connect(worker.deleteLater)
@@ -122,6 +158,10 @@ class RepeaterSession(QWidget):
         worker.start()
 
     def _on_response(self, result: dict) -> None:
+        # Drop our reference to the worker before its scheduled deleteLater()
+        # runs. Without this, the next click into _send() calls isRunning() on
+        # a deleted C++ QThread and the click silently no-ops.
+        self._worker = None
         self._send_btn.setEnabled(True)
         if result.get("error"):
             self._status_label.setText(f"error: {result['error']}")
@@ -133,7 +173,19 @@ class RepeaterSession(QWidget):
         status = result.get("status")
         dur = result.get("duration_ms", 0)
         body = result.get("body", b"")
-        self._status_label.setText(f"status {status} · {len(body)} bytes · {dur} ms")
+
+        # If we followed redirects, append the hop chain so the user can see
+        # what happened without scrolling through history.
+        chain = result.get("chain") or []
+        suffix = ""
+        if len(chain) > 1:
+            arrow = " → ".join(str(hop.get("status") or "?") for hop in chain)
+            hops = result.get("hops") or (len(chain) - 1)
+            total = result.get("total_ms", dur)
+            suffix = f" · {hops} hop{'s' if hops != 1 else ''}: {arrow} · {total} ms total"
+            if result.get("truncated"):
+                suffix += " · max-redirects reached"
+        self._status_label.setText(f"status {status} · {len(body)} bytes · {dur} ms{suffix}")
 
         decoded, note = bodydecode.decode_body(body, result.get("headers", {}))
         raw = result.get("raw", b"")
@@ -160,6 +212,16 @@ class RepeaterTab(QWidget):
 
         self._tabs = QTabWidget(self)
         self._tabs.setTabsClosable(True)
+        # Match the main window's tab styling: flat strip with left-aligned
+        # session tabs. Without these two lines Qt expands each tab to share
+        # the full bar width, so a single open session pads out across the
+        # whole pane.
+        self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().setExpanding(False)
+        # macOS's native QTabBar painter ignores QSS background; force it to
+        # honor chrome_bg so the strip right of the last session tab isn't
+        # a dark patch in light mode.
+        self._tabs.tabBar().setAttribute(Qt.WA_StyledBackground, True)
         self._tabs.tabCloseRequested.connect(self._close_session)
 
         add_btn = QPushButton("+ New session", self)
@@ -203,5 +265,22 @@ class RepeaterTab(QWidget):
         self._counter += 1
         title = label or f"Session {self._counter}"
         index = self._tabs.addTab(session, title)
+        # Replace the native close button with a plain × that matches the
+        # tab text color (fg_muted) and shifts to fg on hover — styled via
+        # the `[role="tabClose"]` QSS rule in main_window. Captures `session`
+        # by closure so reorder/insert doesn't desync the index.
+        close_btn = QPushButton("×", self)
+        close_btn.setProperty("role", "tabClose")
+        close_btn.setFlat(True)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFocusPolicy(Qt.NoFocus)
+        close_btn.setFixedSize(18, 18)
+        close_btn.clicked.connect(lambda _checked=False, w=session: self._close_session_widget(w))
+        self._tabs.tabBar().setTabButton(index, QTabBar.RightSide, close_btn)
         self._tabs.setCurrentIndex(index)
         return session
+
+    def _close_session_widget(self, w: QWidget) -> None:
+        index = self._tabs.indexOf(w)
+        if index >= 0:
+            self._close_session(index)

@@ -5,13 +5,19 @@ The highlighter is intentionally heuristic — it recognizes the HTTP request
 line, response status line, header-name: value pairs, JSON primitives, and
 simple HTML tags. It is good enough to make bodies readable without pulling in
 a full tree-sitter grammar.
+
+The colour palette swaps with the theme. On dark we use bright, low-saturation
+tints; on light we use deeper variants that pass legibility checks against the
+warm-off-white surface. ``refresh_theme()`` is called by ``MainWindow`` after
+the global QSS + palette swap so every active highlighter re-stains itself.
 """
 from __future__ import annotations
 
 import re
 
 from PySide6.QtCore import QRegularExpression
-from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtGui import QColor, QFont, QPalette, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtWidgets import QApplication
 
 
 def _fmt(color: str, bold: bool = False, italic: bool = False) -> QTextCharFormat:
@@ -24,22 +30,56 @@ def _fmt(color: str, bold: bool = False, italic: bool = False) -> QTextCharForma
     return f
 
 
+# Per-theme palettes. Keys map onto the eight `fmt_*` attributes the
+# highlighter assigns to tokens. Light-mode values are deeper / more saturated
+# so they read cleanly on the #fbfbf7 surface; the dark-mode values match the
+# theme accents.
+_DARK_PALETTE = {
+    "method":       "#5ecb7b",  # green, bold
+    "path":         "#ebebed",  # ~ fg
+    "proto":        "#7aa2ff",
+    "status":       "#ff7d3d",  # ~ accent, bold
+    "header_name":  "#e7b648",
+    "header_value": "#ebebed",
+    "string":       "#5ecb7b",
+    "number":       "#7aa2ff",
+    "constant":     "#ff7d3d",
+    "tag":          "#7aa2ff",
+    "comment":      "#8b8b93",
+}
+_LIGHT_PALETTE = {
+    "method":       "#1c9c4d",  # forest green
+    "path":         "#1a1a1d",  # ~ fg (near black for legibility)
+    "proto":        "#2858a8",
+    "status":       "#cd4d15",  # deep orange, matches the light accent
+    "header_name":  "#9a6b14",  # amber
+    "header_value": "#1a1a1d",
+    "string":       "#1c9c4d",
+    "number":       "#2858a8",
+    "constant":     "#cd4d15",
+    "tag":          "#2858a8",
+    "comment":      "#6a6a72",
+}
+
+
+def _current_theme() -> str:
+    """Detect whether we're in light or dark mode from the app palette.
+
+    The Window role is the most reliable indicator since `_apply_palette` in
+    MainWindow sets it directly from the active theme's bg colour. We treat
+    anything brighter than 50% lightness as light mode.
+    """
+    qapp = QApplication.instance()
+    if qapp is None:
+        return "dark"
+    bg = qapp.palette().color(QPalette.Window)
+    return "light" if bg.lightnessF() > 0.5 else "dark"
+
+
 class HttpHighlighter(QSyntaxHighlighter):
     def __init__(self, document) -> None:
         super().__init__(document)
-
-        # Palette tuned for the dark theme used elsewhere.
-        self.fmt_method = _fmt("#5ecb7b", bold=True)
-        self.fmt_path = _fmt("#e8e8ec")
-        self.fmt_proto = _fmt("#7aa2ff")
-        self.fmt_status = _fmt("#ff7030", bold=True)
-        self.fmt_header_name = _fmt("#e7b648")
-        self.fmt_header_value = _fmt("#e8e8ec")
-        self.fmt_string = _fmt("#5ecb7b")
-        self.fmt_number = _fmt("#7aa2ff")
-        self.fmt_constant = _fmt("#ff7030", bold=True)
-        self.fmt_tag = _fmt("#7aa2ff")
-        self.fmt_comment = _fmt("#9a9aa8", italic=True)
+        self._apply_palette(_current_theme())
 
         self._request_line = QRegularExpression(
             r"^([A-Z]+)\s+(\S+)\s+(HTTP/\d(?:\.\d)?)\s*$"
@@ -54,6 +94,26 @@ class HttpHighlighter(QSyntaxHighlighter):
         self._json_number = QRegularExpression(r"-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b")
         self._json_const = QRegularExpression(r"\b(true|false|null)\b")
         self._html_tag = QRegularExpression(r"<\s*/?\s*[A-Za-z][^>]*>")
+
+    def _apply_palette(self, theme: str) -> None:
+        """Pick a per-theme palette and rebuild the format objects."""
+        pal = _LIGHT_PALETTE if theme == "light" else _DARK_PALETTE
+        self.fmt_method = _fmt(pal["method"], bold=True)
+        self.fmt_path = _fmt(pal["path"])
+        self.fmt_proto = _fmt(pal["proto"])
+        self.fmt_status = _fmt(pal["status"], bold=True)
+        self.fmt_header_name = _fmt(pal["header_name"])
+        self.fmt_header_value = _fmt(pal["header_value"])
+        self.fmt_string = _fmt(pal["string"])
+        self.fmt_number = _fmt(pal["number"])
+        self.fmt_constant = _fmt(pal["constant"], bold=True)
+        self.fmt_tag = _fmt(pal["tag"])
+        self.fmt_comment = _fmt(pal["comment"], italic=True)
+
+    def refresh_theme(self) -> None:
+        """Re-pick the palette from the current app state and repaint."""
+        self._apply_palette(_current_theme())
+        self.rehighlight()
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt override
         if not text:

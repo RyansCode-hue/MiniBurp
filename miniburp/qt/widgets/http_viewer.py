@@ -142,6 +142,12 @@ class HttpViewer(QWidget):
         self._raw_bytes = b""
         self.edit.clear()
 
+    def refresh_highlight_theme(self) -> None:
+        """Called by MainWindow after a theme swap so the highlighter
+        re-stains the document with the colors of the new palette."""
+        if self.highlighter is not None and self._mode == "text":
+            self.highlighter.refresh_theme()
+
     # ---- internals -----------------------------------------------------
     def _set_hex_mode(self, hex_on: bool) -> None:
         # Preserve edits in text mode before switching.

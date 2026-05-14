@@ -23,7 +23,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -39,6 +38,7 @@ from ... import bodydecode
 from ...scope import SCOPE
 from ...storage import STORE
 from ..signals import StoreBridge
+from ..widgets.combobox import MiniBurpComboBox
 from ..widgets.http_viewer import HttpViewer
 
 
@@ -262,13 +262,13 @@ class ProxyTab(QWidget):
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
 
-        self._method_combo = QComboBox(self)
+        self._method_combo = MiniBurpComboBox(self)
         self._method_combo.addItems(["Any method", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
         self._host_edit = QLineEdit(self)
         self._host_edit.setPlaceholderText("Host contains…")
         self._path_edit = QLineEdit(self)
         self._path_edit.setPlaceholderText("Path contains…")
-        self._status_combo = QComboBox(self)
+        self._status_combo = MiniBurpComboBox(self)
         self._status_combo.addItems(["Any status", "2xx", "3xx", "4xx", "5xx"])
         self._scope_check = QCheckBox("In-scope only", self)
         self._scope_check.setChecked(True)

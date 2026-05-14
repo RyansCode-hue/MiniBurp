@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from ... import decoder as decoder_module
+from ..widgets.combobox import MiniBurpComboBox
 
 
 class DecoderTab(QWidget):
@@ -33,7 +33,7 @@ class DecoderTab(QWidget):
 
         op_row = QHBoxLayout()
         op_row.addWidget(QLabel("Operation:", self))
-        self._op = QComboBox(self)
+        self._op = MiniBurpComboBox(self)
         for key, label in decoder_module.OPS:
             self._op.addItem(label, key)
         self._op.setCurrentIndex(1)  # base64-decode by default

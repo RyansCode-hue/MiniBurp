@@ -11,7 +11,6 @@ from typing import Optional
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,6 +26,7 @@ from PySide6.QtWidgets import (
 from ... import bodydecode
 from ...sender import send_raw, send_with_redirects
 from ...storage import STORE
+from ..widgets.combobox import MiniBurpComboBox
 from ..widgets.http_viewer import HttpEditor, HttpViewer
 
 
@@ -83,7 +83,7 @@ class RepeaterSession(QWidget):
         # ---- target row ----
         target_row = QHBoxLayout()
         target_row.addWidget(QLabel("Scheme:", self))
-        self._scheme = QComboBox(self)
+        self._scheme = MiniBurpComboBox(self)
         self._scheme.addItems(["http", "https"])
         self._scheme.setCurrentText(scheme)
 

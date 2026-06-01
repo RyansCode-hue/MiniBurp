@@ -75,3 +75,21 @@ def test_round_trip_without_edits_is_stable():
     out = apply_params(raw, parse_params(raw))
     assert b"GET /a?x=1&y=two HTTP/1.1" in out
     assert b"Host: lab.net" in out
+
+
+def test_non_canonical_request_line_spacing_not_corrupted():
+    # Stray double spaces in the request line must not shift the path.
+    raw = b"GET  /a?x=1  HTTP/1.1\r\nHost: lab.net\r\n\r\n"
+    params = parse_params(raw)
+    params[0].value = "2"  # x=1 -> x=2
+    out = apply_params(raw, params)
+    assert out.split(b"\r\n", 1)[0] == b"GET /a?x=2 HTTP/1.1"
+
+
+def test_absolute_form_request_line_preserves_scheme_and_host():
+    # Plain-HTTP proxy form keeps scheme+authority through a param edit.
+    raw = b"GET http://example.com/search?q=hi HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    params = parse_params(raw)
+    params[0].value = "bye"
+    out = apply_params(raw, params)
+    assert out.split(b"\r\n", 1)[0] == b"GET http://example.com/search?q=bye HTTP/1.1"

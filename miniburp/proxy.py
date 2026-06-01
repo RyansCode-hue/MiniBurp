@@ -81,9 +81,18 @@ def _apply_request_rules(host: str, raw: bytes) -> bytes:
     modified = RULES.apply_request(raw)
     if modified == raw:
         return raw
+    # Keep Content-Length honest after a body rule. Recompute when the request
+    # has a body OR already declares a Content-Length — so a rule that *empties*
+    # the body correctly drops Content-Length to 0 instead of leaving a stale
+    # length that hangs the upstream. Bodyless GETs (no CL header) stay untouched.
     sp = modified.find(b"\r\n\r\n")
-    if sp != -1 and modified[sp + 4:]:
-        modified = recompute_content_length(modified)
+    if sp != -1:
+        head, body = modified[:sp], modified[sp + 4:]
+        has_cl = any(
+            ln.lower().startswith(b"content-length:") for ln in head.split(b"\r\n")
+        )
+        if body or has_cl:
+            modified = recompute_content_length(modified)
     return modified
 
 

@@ -59,7 +59,7 @@ def parse_params(raw: bytes) -> list[Param]:
     req_line, header_lines, body = _split(raw)
     out: list[Param] = []
 
-    parts = req_line.decode("iso-8859-1", errors="replace").split(" ")
+    parts = req_line.decode("iso-8859-1", errors="replace").split()
     if len(parts) >= 2:
         for k, v in parse_qsl(urlsplit(parts[1]).query, keep_blank_values=True):
             out.append(Param("query", k, v))
@@ -96,11 +96,14 @@ def apply_params(raw: bytes, params: list[Param]) -> bytes:
     has_body_params = any(p.location == "body" for p in params)
 
     # ---- request-line query ----
-    parts = req_line.decode("iso-8859-1", errors="replace").split(" ")
-    if len(parts) >= 2:
+    # Split on whitespace runs so a non-canonical line (stray double spaces)
+    # still yields METHOD / TARGET / VERSION; only rebuild a well-formed
+    # 3-token line, and preserve scheme+authority for absolute-form targets.
+    parts = req_line.decode("iso-8859-1", errors="replace").split()
+    if len(parts) == 3:
         sp = urlsplit(parts[1])
         new_q = urlencode(query, safe=_SAFE)
-        parts[1] = urlunsplit(("", "", sp.path or "/", new_q, sp.fragment))
+        parts[1] = urlunsplit((sp.scheme, sp.netloc, sp.path or "/", new_q, sp.fragment))
         req_line = " ".join(parts).encode("iso-8859-1")
 
     # ---- Cookie header ----

@@ -108,3 +108,23 @@ def test_proxy_helper_respects_scope_and_fixes_content_length():
     finally:
         RULES.set_rules([])
         SCOPE.set_patterns([])
+
+
+def test_proxy_helper_emptying_body_zeroes_content_length():
+    """A rule that empties the body must drop Content-Length to 0, not leave a
+    stale length that hangs the upstream."""
+    from miniburp.proxy import _apply_request_rules
+    from miniburp.rules import RULES
+    from miniburp.scope import SCOPE
+
+    req = b"POST /x HTTP/1.1\r\nHost: lab.net\r\nContent-Length: 7\r\n\r\npayload"
+    try:
+        RULES.set_rules([Rule("req-body", "payload", "")])
+        SCOPE.set_patterns(["lab.net"])
+        out = _apply_request_rules("lab.net", req)
+        assert out.endswith(b"\r\n\r\n")  # body gone
+        assert b"Content-Length: 0" in out
+        assert b"Content-Length: 7" not in out
+    finally:
+        RULES.set_rules([])
+        SCOPE.set_patterns([])

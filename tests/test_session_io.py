@@ -85,3 +85,15 @@ def test_store_load_repopulates_and_publishes():
         kinds.append(q.get_nowait()["kind"])
     assert kinds[0] == "clear"
     assert kinds.count("add") == 2
+
+
+def test_store_load_survives_null_started_at():
+    """A hand-edited/corrupt session file with a null started_at must not crash
+    the load (summary() -> duration_ms used to raise on None - None)."""
+    store = Store()
+    items = load_transactions(dump_transactions(_sample_txs()))
+    items[0]["started_at"] = None  # simulate a malformed/older file
+    items[0]["finished_at"] = 5.0
+    store.load(items)  # would raise TypeError before the duration_ms guard
+    assert len(store.all()) == 2
+    assert store.all()[0].duration_ms is None

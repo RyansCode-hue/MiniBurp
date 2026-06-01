@@ -66,7 +66,7 @@ class Transaction:
 
     @property
     def duration_ms(self) -> Optional[int]:
-        if self.finished_at is None:
+        if self.finished_at is None or self.started_at is None:
             return None
         return int((self.finished_at - self.started_at) * 1000)
 

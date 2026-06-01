@@ -200,6 +200,45 @@ python run.py --no-browser            # desktop only
 python run.py --web                   # legacy Flask UI at http://127.0.0.1:8888/
 ```
 
+### Double-click launcher that updates with `git pull` (recommended for devs)
+
+`./build.sh` re-freezes the app with PyInstaller every time, and each rebuild
+gets a fresh code-signing identity — so macOS re-prompts for permissions
+(Accessibility, firewall, …) on every build. If you're working from the repo and
+just want a double-click app for daily lab work, install the **launcher** once
+instead of building.
+
+**One-time setup** (from a fresh clone):
+
+```bash
+git clone https://github.com/RyansCode-hue/MiniBurp.git
+cd MiniBurp
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+tools/make_launcher.sh            # creates ~/Applications/MiniBurp.app
+```
+
+Then launch it like any Mac app — Spotlight (⌘-Space → "MiniBurp"), the
+`~/Applications` folder, or `open ~/Applications/MiniBurp.app`. Drag it to the
+Dock once for one-click access.
+
+The launcher is a tiny wrapper `MiniBurp.app` that runs your live source
+(`.venv/bin/python run.py`). It has no frozen bootloader and no argv-emulation,
+so it never asks for Accessibility, and its bytes never change, so its identity —
+and every permission you grant it — is stable forever.
+
+**Updating from then on is just `git pull`** — no rebuild; the app always runs
+the checked-out source, so reopening it picks up the new code. Re-run
+`tools/make_launcher.sh` only if you move the repo or it tells you to (e.g. a
+changed launcher script). Run `pip install -r requirements.txt` after a pull that
+changes dependencies.
+
+> The launcher bakes in your repo + venv path, so it's per-machine — each
+> developer runs `tools/make_launcher.sh` once on their own clone. It is **not**
+> a shareable binary. To hand MiniBurp to someone who won't clone the repo, use
+> `./build.sh` to cut a standalone, self-contained `.app`.
+
 Useful environment variables:
 
 - `MINIBURP_CHROME=/path/to/chrome` — override browser auto-detection

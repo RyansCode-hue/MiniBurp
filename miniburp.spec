@@ -67,7 +67,11 @@ exe = EXE(
     upx=False,
     console=False,           # windowed
     disable_windowed_traceback=False,
-    argv_emulation=True,     # macOS: forward CLI args into sys.argv
+    # argv_emulation installs an Apple-Event/event-tap handler in the frozen
+    # bootloader, which makes macOS demand Accessibility/Input-Monitoring (and
+    # that grant resets on every rebuild since the signature changes). MiniBurp
+    # registers no file/URL associations, so it gains nothing — keep it off.
+    argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,

@@ -617,6 +617,8 @@ class MainWindow(QMainWindow):
 
         self.proxy_tab.send_to_repeater.connect(self._send_to_repeater)
         self.proxy_tab.send_to_intruder.connect(self._send_to_intruder)
+        self.intercept_tab.send_to_repeater.connect(self._intercept_to_repeater)
+        self.intercept_tab.send_to_intruder.connect(self._intercept_to_intruder)
 
         self._bridge.added.connect(self._on_added)
 
@@ -650,6 +652,24 @@ class MainWindow(QMainWindow):
 
     def _send_to_intruder(self, tx_id: int) -> None:
         self.intruder_tab.new_session_from_tx(tx_id)
+        self._tabs.setCurrentWidget(self.intruder_tab)
+
+    def _intercept_to_repeater(self, tx_id: int, raw) -> None:
+        tx = STORE.get(tx_id)
+        if tx is None:
+            return
+        self.repeater_tab.new_session_from_bytes(
+            tx.scheme, tx.host, tx.port, bytes(raw), label=f"#{tx_id} {tx.host}"
+        )
+        self._tabs.setCurrentWidget(self.repeater_tab)
+
+    def _intercept_to_intruder(self, tx_id: int, raw) -> None:
+        tx = STORE.get(tx_id)
+        if tx is None:
+            return
+        self.intruder_tab.new_session_from_bytes(
+            tx.scheme, tx.host, tx.port, bytes(raw), label=f"#{tx_id} {tx.host}"
+        )
         self._tabs.setCurrentWidget(self.intruder_tab)
 
     # ---- theme ---------------------------------------------------------

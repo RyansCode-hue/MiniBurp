@@ -62,3 +62,35 @@ def test_proxy_context_menu_copy_helpers(app):
     cmd = to_curl(tx.method, tx.url, tx.req_headers, tx.req_body)
     assert "lab.net/image?filename=10.jpg" in cmd
     STORE.clear()
+
+
+def test_intercept_send_to_repeater_carries_edited_bytes(app):
+    from miniburp.qt.main_window import MainWindow
+    from miniburp.storage import STORE
+
+    STORE.clear()
+    tx = STORE.add(
+        method="GET", scheme="https", host="lab.net", port=443,
+        path="/image?filename=10.jpg", req_headers={"Host": "lab.net"},
+        req_body=b"",
+        raw_request=b"GET /image?filename=10.jpg HTTP/1.1\r\nHost: lab.net\r\n\r\n",
+    )
+    w = MainWindow("127.0.0.1", 8080)
+    try:
+        edited = (
+            b"GET /image?filename=../../../etc/passwd HTTP/1.1\r\n"
+            b"Host: lab.net\r\n\r\n"
+        )
+        before = w.repeater_tab._tabs.count()
+        w._intercept_to_repeater(tx.id, edited)
+        assert w.repeater_tab._tabs.count() == before + 1
+        # The user's edited held bytes seed the session, not the captured request.
+        sess = w.repeater_tab._tabs.currentWidget()
+        assert b"etc/passwd" in sess._req_editor.bytes_value()
+
+        w._intercept_to_intruder(tx.id, edited)
+        templ = w.intruder_tab._tabs.currentWidget()._template.bytes_value()
+        assert b"etc/passwd" in templ
+    finally:
+        w.close()
+        STORE.clear()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -31,6 +31,10 @@ from ..widgets.http_viewer import HttpEditor
 
 class _HoldPane(QWidget):
     """One editable viewer + action buttons for a single held tx_id."""
+
+    # (tx_id, edited raw bytes) — bubbled up to MainWindow which knows the tabs.
+    to_repeater = Signal(int, object)
+    to_intruder = Signal(int, object)
 
     def __init__(self, tx_id: int, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -62,9 +66,17 @@ class _HoldPane(QWidget):
         self._drop_btn = QPushButton("Drop", self)
         self._drop_btn.setProperty("role", "danger")
         self._drop_btn.setToolTip("Drop this request  (⌘⌫ / Ctrl+Backspace)")
+        self._to_rep_btn = QPushButton("Send to Repeater", self)
+        self._to_rep_btn.setToolTip(
+            "Open this request (with your edits) in a new Repeater session.\n"
+            "The request stays held — Forward or Drop it separately."
+        )
+        self._to_intr_btn = QPushButton("Send to Intruder", self)
         btn_row.addWidget(self._forward_btn)
         btn_row.addWidget(self._drop_btn)
         btn_row.addStretch(1)
+        btn_row.addWidget(self._to_rep_btn)
+        btn_row.addWidget(self._to_intr_btn)
 
         root.addWidget(self._title)
         root.addWidget(self.editor, 1)
@@ -72,6 +84,12 @@ class _HoldPane(QWidget):
 
         self._forward_btn.clicked.connect(self._forward)
         self._drop_btn.clicked.connect(self._drop)
+        self._to_rep_btn.clicked.connect(
+            lambda: self.to_repeater.emit(self._tx_id, self.editor.bytes_value())
+        )
+        self._to_intr_btn.clicked.connect(
+            lambda: self.to_intruder.emit(self._tx_id, self.editor.bytes_value())
+        )
 
         # Forward / Drop without leaving the keyboard. Scoped to this pane so an
         # intercept-heavy lab can be cleared by hand quickly.
@@ -91,6 +109,10 @@ class _HoldPane(QWidget):
 
 
 class InterceptTab(QWidget):
+    # Re-emitted from the focused hold pane (tx_id, edited raw bytes).
+    send_to_repeater = Signal(int, object)
+    send_to_intruder = Signal(int, object)
+
     def __init__(self, bridge: StoreBridge, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
 
@@ -173,6 +195,8 @@ class InterceptTab(QWidget):
         if tx_id in self._panes:
             return
         pane = _HoldPane(tx_id, parent=self)
+        pane.to_repeater.connect(self.send_to_repeater)
+        pane.to_intruder.connect(self.send_to_intruder)
         self._panes[tx_id] = pane
         self._stack.addWidget(pane)
         item = QListWidgetItem(f"#{tx_id}", self._list)

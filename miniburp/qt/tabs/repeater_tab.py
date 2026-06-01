@@ -262,14 +262,25 @@ class RepeaterTab(QWidget):
         tx = STORE.get(tx_id)
         if not tx:
             return None
-        session = RepeaterSession(
-            scheme=tx.scheme,
-            host=tx.host,
-            port=tx.port,
-            raw=tx.raw_request,
-            parent=self,
+        return self.new_session_from_bytes(
+            tx.scheme, tx.host, tx.port, tx.raw_request, label=f"#{tx.id} {tx.host}"
         )
-        return self._add_session(session, label=f"#{tx.id} {tx.host}")
+
+    def new_session_from_bytes(
+        self,
+        scheme: str,
+        host: str,
+        port: int,
+        raw: bytes,
+        label: Optional[str] = None,
+    ) -> RepeaterSession:
+        """Seed a session from explicit bytes — used by 'Send to Repeater' from
+        the Intercept tab so the user's *edited* held bytes carry over rather
+        than the originally-captured request."""
+        session = RepeaterSession(
+            scheme=scheme, host=host, port=port, raw=bytes(raw), parent=self
+        )
+        return self._add_session(session, label=label)
 
     def _add_session(self, session: RepeaterSession, label: Optional[str] = None) -> RepeaterSession:
         self._counter += 1

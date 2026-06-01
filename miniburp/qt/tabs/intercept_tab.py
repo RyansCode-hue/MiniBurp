@@ -7,10 +7,12 @@ Intercept ON/OFF and Forward-all.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -23,17 +25,31 @@ from PySide6.QtWidgets import (
 )
 
 from ...intercept import INTERCEPT
+from ...sender import recompute_content_length
 from ...storage import STORE
 from ..signals import StoreBridge
+from ..widgets.hint_strip import HintStrip
 from ..widgets.http_viewer import HttpEditor
 
 
 class _HoldPane(QWidget):
     """One editable viewer + action buttons for a single held tx_id."""
 
-    def __init__(self, tx_id: int, parent: Optional[QWidget] = None) -> None:
+    # (tx_id, edited raw bytes) — bubbled up to MainWindow which knows the tabs.
+    to_repeater = Signal(int, object)
+    to_intruder = Signal(int, object)
+
+    def __init__(
+        self,
+        tx_id: int,
+        auto_content_length: Optional[Callable[[], bool]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self._tx_id = tx_id
+        # Queried at Forward time so toggling the toolbar checkbox takes effect
+        # without rewiring every open pane.
+        self._auto_cl = auto_content_length or (lambda: False)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -57,11 +73,21 @@ class _HoldPane(QWidget):
         btn_row = QHBoxLayout()
         self._forward_btn = QPushButton("Forward", self)
         self._forward_btn.setProperty("role", "primary")
+        self._forward_btn.setToolTip("Forward this request  (⌘↵ / Ctrl+Enter)")
         self._drop_btn = QPushButton("Drop", self)
         self._drop_btn.setProperty("role", "danger")
+        self._drop_btn.setToolTip("Drop this request  (⌘⌫ / Ctrl+Backspace)")
+        self._to_rep_btn = QPushButton("Send to Repeater", self)
+        self._to_rep_btn.setToolTip(
+            "Open this request (with your edits) in a new Repeater session.\n"
+            "The request stays held — Forward or Drop it separately."
+        )
+        self._to_intr_btn = QPushButton("Send to Intruder", self)
         btn_row.addWidget(self._forward_btn)
         btn_row.addWidget(self._drop_btn)
         btn_row.addStretch(1)
+        btn_row.addWidget(self._to_rep_btn)
+        btn_row.addWidget(self._to_intr_btn)
 
         root.addWidget(self._title)
         root.addWidget(self.editor, 1)
@@ -69,15 +95,42 @@ class _HoldPane(QWidget):
 
         self._forward_btn.clicked.connect(self._forward)
         self._drop_btn.clicked.connect(self._drop)
+        self._to_rep_btn.clicked.connect(
+            lambda: self.to_repeater.emit(self._tx_id, self.editor.bytes_value())
+        )
+        self._to_intr_btn.clicked.connect(
+            lambda: self.to_intruder.emit(self._tx_id, self.editor.bytes_value())
+        )
+
+        # Forward / Drop without leaving the keyboard. Scoped to this pane so an
+        # intercept-heavy lab can be cleared by hand quickly.
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(self._forward)
+        sc_drop = QShortcut(QKeySequence("Ctrl+Backspace"), self)
+        sc_drop.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_drop.activated.connect(self._drop)
 
     def _forward(self) -> None:
-        INTERCEPT.forward(self._tx_id, self.editor.bytes_value())
+        raw = self.editor.bytes_value()
+        # Editing a body (lengthen a username, add a SQLi payload) leaves the
+        # original Content-Length stale, which truncates or hangs the request
+        # server-side. On by default; the toolbar checkbox can disable it for
+        # users deliberately testing length-handling.
+        if self._auto_cl():
+            raw = recompute_content_length(raw)
+        INTERCEPT.forward(self._tx_id, raw)
 
     def _drop(self) -> None:
         INTERCEPT.drop(self._tx_id)
 
 
 class InterceptTab(QWidget):
+    # Re-emitted from the focused hold pane (tx_id, edited raw bytes).
+    send_to_repeater = Signal(int, object)
+    send_to_intruder = Signal(int, object)
+
     def __init__(self, bridge: StoreBridge, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
 
@@ -85,17 +138,31 @@ class InterceptTab(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
+        root.addWidget(HintStrip(
+            "Only <b>in-scope</b> requests are held — set a pattern in "
+            "<b>Scope</b> and turn Intercept <b>ON</b>. Edit the request, then "
+            "Forward (⌘↵) or Drop (⌘⌫). 'Send to Repeater' keeps your edits."
+        ))
+
         # --- toolbar ---
         toolbar = QHBoxLayout()
         self._toggle_btn = QPushButton("Turn ON", self)
         self._toggle_btn.setCheckable(True)
         self._forward_all_btn = QPushButton("Forward all", self)
         self._forward_all_btn.setProperty("role", "primary")
+        self._auto_cl_check = QCheckBox("Auto Content-Length", self)
+        self._auto_cl_check.setChecked(True)
+        self._auto_cl_check.setToolTip(
+            "Recompute Content-Length to match the edited body before forwarding.\n"
+            "On by default so a lengthened body isn't truncated server-side.\n"
+            "Uncheck to send the byte count exactly as typed."
+        )
         self._status_label = QLabel("Intercept: OFF", self)
         self._status_label.setProperty("role", "muted")
 
         toolbar.addWidget(self._toggle_btn)
         toolbar.addWidget(self._forward_all_btn)
+        toolbar.addWidget(self._auto_cl_check)
         toolbar.addWidget(self._status_label)
         toolbar.addStretch(1)
 
@@ -159,7 +226,11 @@ class InterceptTab(QWidget):
     def _on_held(self, tx_id: int) -> None:
         if tx_id in self._panes:
             return
-        pane = _HoldPane(tx_id, parent=self)
+        pane = _HoldPane(
+            tx_id, auto_content_length=self._auto_cl_check.isChecked, parent=self
+        )
+        pane.to_repeater.connect(self.send_to_repeater)
+        pane.to_intruder.connect(self.send_to_intruder)
         self._panes[tx_id] = pane
         self._stack.addWidget(pane)
         item = QListWidgetItem(f"#{tx_id}", self._list)

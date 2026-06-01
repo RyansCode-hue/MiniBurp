@@ -170,3 +170,91 @@ def build_request_bytes(start_line: str, headers: dict[str, str], body: bytes) -
 
 def build_response_bytes(start_line: str, headers: dict[str, str], body: bytes) -> bytes:
     return build_request_bytes(start_line, headers, body)  # same shape
+
+
+def encode_http_text(text: str) -> bytes:
+    """Encode editor text to HTTP wire bytes, normalizing newlines to CRLF.
+
+    HTTP/1.1 treats the request line and headers as iso-8859-1, so we prefer
+    it. But a body can legitimately carry UTF-8 — unicode-normalization or
+    overlong path-traversal payloads, multibyte test strings, smart quotes
+    pasted from a writeup. Rather than silently turning every non-Latin-1
+    character into ``?`` (the old ``errors="replace"``), fall back to UTF-8
+    for the whole message when strict Latin-1 fails, so the user's bytes reach
+    the server intact instead of being corrupted invisibly.
+    """
+    text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    try:
+        return text.encode("iso-8859-1")
+    except UnicodeEncodeError:
+        return text.encode("utf-8")
+
+
+def ensure_content_length(headers: dict[str, str], body: bytes) -> dict[str, str]:
+    """Set ``Content-Length`` to ``len(body)`` when a body is present and no
+    Content-Length header survived.
+
+    Mutates and returns ``headers`` for convenience. This is the request-side
+    mirror of what the response path already does: ``read_request`` decodes a
+    ``Transfer-Encoding: chunked`` body into plain bytes and the proxy strips
+    ``transfer-encoding`` when forwarding, leaving a body with no length
+    declaration. Without this, upstream treats the request as zero-length
+    (dropping the payload) or reads until close. No-op for empty bodies or
+    when a Content-Length is already present (case-insensitive).
+    """
+    if not body:
+        return headers
+    for k in headers:
+        if k.lower() == "content-length":
+            return headers
+    headers["Content-Length"] = str(len(body))
+    return headers
+
+
+def validate_request_bytes(raw: bytes) -> Optional[str]:
+    """Return a human-readable error if ``raw`` isn't a forwardable request.
+
+    Guards the proxy against a hand-edited Intercept request whose start line
+    lost a token (deleted HTTP version, double-spaced path) or whose Host header
+    was removed — both would otherwise raise deep inside the worker
+    (``start_line.split(" ", 2)``) and drop the connection with no feedback.
+    Returns ``None`` when the request looks well-formed.
+    """
+    split = raw.find(b"\r\n\r\n")
+    head = raw[:split] if split != -1 else raw
+    if not head.strip():
+        return "empty request"
+    try:
+        text = head.decode("iso-8859-1")
+    except Exception:
+        return "request headers are not decodable"
+    lines = text.split("\r\n")
+    parts = lines[0].split(" ")
+    if len(parts) != 3:
+        return f"request line must be 'METHOD TARGET HTTP/x.y' (got {lines[0]!r})"
+    method, target, version = parts
+    if not method or not target:
+        return "request line is missing the method or target"
+    if not version.upper().startswith("HTTP/"):
+        return f"request line version must look like HTTP/1.1 (got {version!r})"
+    has_host = any(
+        line.split(":", 1)[0].strip().lower() == "host"
+        for line in lines[1:]
+        if ":" in line
+    )
+    if not has_host:
+        return "request is missing a Host header"
+    return None
+
+
+def parse_status_code(status_line: str) -> Optional[int]:
+    """Pull the numeric status out of a response start line, tolerantly.
+
+    Returns ``None`` for a truncated or non-standard status line (e.g.
+    ``HTTP/1.1`` with no code) instead of raising — a single malformed
+    upstream response shouldn't tear down a keep-alive connection.
+    """
+    try:
+        return int(status_line.split(" ", 2)[1])
+    except (IndexError, ValueError):
+        return None

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from .. import browser as browser_module
 from .. import ca as ca_module
 from ..intercept import INTERCEPT
+from ..scope import SCOPE
 from ..storage import STORE
 from .signals import StoreBridge
 from .tabs.decoder_tab import DecoderTab
@@ -42,6 +43,7 @@ from .tabs.intercept_tab import InterceptTab
 from .tabs.intruder_tab import IntruderTab
 from .tabs.proxy_tab import ProxyTab
 from .tabs.repeater_tab import RepeaterTab
+from .tabs.rules_tab import RulesTab
 from .tabs.scope_tab import ScopeTab
 
 
@@ -548,19 +550,25 @@ class MainWindow(QMainWindow):
         self._intercept_action = QAction("Intercept: OFF", self)
         self._intercept_action.setCheckable(True)
         self._clear_action = QAction("Clear history", self)
+        self._save_session_action = QAction("Save session…", self)
+        self._load_session_action = QAction("Load session…", self)
         self._save_ca_action = QAction("Save CA…", self)
         self._theme_action = QAction(self._theme_action_label(), self)
         # Qt auto-derives a tooltip from QAction.text() and shows it on
         # hover in the toolbar. With the text already visible on the button
         # the tooltip just duplicates it — kill them.
         for act in (self._launch_action, self._intercept_action,
-                    self._clear_action, self._save_ca_action, self._theme_action):
+                    self._clear_action, self._save_session_action,
+                    self._load_session_action, self._save_ca_action,
+                    self._theme_action):
             act.setToolTip("")
 
         tb.addAction(self._launch_action)
         tb.addAction(self._intercept_action)
         tb.addSeparator()
         tb.addAction(self._clear_action)
+        tb.addAction(self._save_session_action)
+        tb.addAction(self._load_session_action)
         tb.addAction(self._save_ca_action)
 
         # Expanding spacer pushes the status indicators to the right edge.
@@ -591,6 +599,7 @@ class MainWindow(QMainWindow):
         self.repeater_tab = RepeaterTab(self)
         self.intruder_tab = IntruderTab(self)
         self.decoder_tab = DecoderTab(self)
+        self.rules_tab = RulesTab(self)
         self.scope_tab = ScopeTab(self)
 
         self._tabs.addTab(self.proxy_tab, "Proxy")
@@ -598,6 +607,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self.repeater_tab, "Repeater")
         self._tabs.addTab(self.intruder_tab, "Intruder")
         self._tabs.addTab(self.decoder_tab, "Decoder")
+        self._tabs.addTab(self.rules_tab, "Match/Replace")
         self._tabs.addTab(self.scope_tab, "Scope")
 
         self.setCentralWidget(self._tabs)
@@ -612,11 +622,15 @@ class MainWindow(QMainWindow):
         self._launch_action.triggered.connect(self._launch_browser)
         self._intercept_action.toggled.connect(self._toggle_intercept)
         self._clear_action.triggered.connect(STORE.clear)
+        self._save_session_action.triggered.connect(self._save_session)
+        self._load_session_action.triggered.connect(self._load_session)
         self._save_ca_action.triggered.connect(self._save_ca)
         self._theme_action.triggered.connect(self._toggle_theme)
 
         self.proxy_tab.send_to_repeater.connect(self._send_to_repeater)
         self.proxy_tab.send_to_intruder.connect(self._send_to_intruder)
+        self.intercept_tab.send_to_repeater.connect(self._intercept_to_repeater)
+        self.intercept_tab.send_to_intruder.connect(self._intercept_to_intruder)
 
         self._bridge.added.connect(self._on_added)
 
@@ -650,6 +664,24 @@ class MainWindow(QMainWindow):
 
     def _send_to_intruder(self, tx_id: int) -> None:
         self.intruder_tab.new_session_from_tx(tx_id)
+        self._tabs.setCurrentWidget(self.intruder_tab)
+
+    def _intercept_to_repeater(self, tx_id: int, raw) -> None:
+        tx = STORE.get(tx_id)
+        if tx is None:
+            return
+        self.repeater_tab.new_session_from_bytes(
+            tx.scheme, tx.host, tx.port, bytes(raw), label=f"#{tx_id} {tx.host}"
+        )
+        self._tabs.setCurrentWidget(self.repeater_tab)
+
+    def _intercept_to_intruder(self, tx_id: int, raw) -> None:
+        tx = STORE.get(tx_id)
+        if tx is None:
+            return
+        self.intruder_tab.new_session_from_bytes(
+            tx.scheme, tx.host, tx.port, bytes(raw), label=f"#{tx_id} {tx.host}"
+        )
         self._tabs.setCurrentWidget(self.intruder_tab)
 
     # ---- theme ---------------------------------------------------------
@@ -782,6 +814,36 @@ class MainWindow(QMainWindow):
         self._intercept_action.setText(f"Intercept: {'ON' if on else 'OFF'}")
         self._sb_label.setText(f"Intercept {'enabled' if on else 'disabled'}")
 
+    def _save_session(self) -> None:
+        from ..session_io import dump_transactions
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Save session", "miniburp-session.json",
+            "MiniBurp session (*.json)",
+        )
+        if not target:
+            return
+        try:
+            txs = STORE.all()
+            Path(target).write_bytes(dump_transactions(txs))
+            self._sb_label.setText(f"Session saved ({len(txs)} request(s)) → {target}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", str(e))
+
+    def _load_session(self) -> None:
+        from ..session_io import load_transactions
+        target, _ = QFileDialog.getOpenFileName(
+            self, "Load session", "", "MiniBurp session (*.json)"
+        )
+        if not target:
+            return
+        try:
+            items = load_transactions(Path(target).read_bytes())
+        except Exception as e:
+            QMessageBox.critical(self, "Load failed", str(e))
+            return
+        STORE.load(items)
+        self._sb_label.setText(f"Session loaded ({len(items)} request(s))")
+
     def _save_ca(self) -> None:
         target, _ = QFileDialog.getSaveFileName(
             self, "Save MiniBurp CA", "miniburp-ca.crt", "PEM Certificates (*.crt)"
@@ -824,7 +886,18 @@ class MainWindow(QMainWindow):
             self._intercept_action.blockSignals(False)
             self._intercept_action.setText(f"Intercept: {'ON' if on else 'OFF'}")
 
-    def _on_added(self, _summary: dict) -> None:
+    def _on_added(self, summary: dict) -> None:
+        # Just-in-time nudge: Intercept is on but this request wasn't held
+        # because its host is out of scope — the #1 "why didn't it stop?"
+        # confusion. Only fires when a non-empty scope actually excludes it.
+        if INTERCEPT.is_enabled() and SCOPE.patterns():
+            host = summary.get("host") or ""
+            if host and not SCOPE.in_scope(host):
+                self._sb_label.setText(
+                    f"Captured {host} but didn't hold it — not in scope. "
+                    f"Add it in the Scope tab to intercept."
+                )
+                return
         self._sb_label.setText(f"{len(STORE.all())} request(s) captured")
 
     # ---- shutdown ------------------------------------------------------

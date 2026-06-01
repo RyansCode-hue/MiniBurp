@@ -33,9 +33,12 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
+from ... import payloads as payloads_module
+from ...http_io import encode_http_text
 from ...sender import recompute_content_length, send_raw
 from ...storage import STORE
 from ..widgets.combobox import MiniBurpComboBox
+from ..widgets.hint_strip import HintStrip
 from ..widgets.http_viewer import HttpEditor
 
 
@@ -167,7 +170,10 @@ class _AttackWorker(QThread):
         """Build the raw request for one attempt, send it, and return the row."""
         if self._abort:
             return None
-        raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("iso-8859-1")
+        # encode_http_text normalizes CRLF and falls back to UTF-8 for non-Latin-1
+        # payloads — the old bare .encode("iso-8859-1") raised and killed the
+        # worker thread the moment a payload contained a multibyte character.
+        raw = encode_http_text(text)
         # Body length changes per attempt — recompute Content-Length so we
         # don't ship truncated requests for every payload but the first.
         raw = recompute_content_length(raw)
@@ -303,6 +309,7 @@ class IntruderSession(QWidget):
 
         self._start_btn = QPushButton("Start attack", self)
         self._start_btn.setProperty("role", "primary")
+        self._start_btn.setToolTip("Start the attack  (⌘↵ / Ctrl+Enter)")
         self._stop_btn = QPushButton("Stop", self)
         self._stop_btn.setEnabled(False)
         controls.addWidget(self._start_btn, 1, 7)
@@ -427,6 +434,13 @@ class IntruderSession(QWidget):
         sc.setContext(Qt.WidgetWithChildrenShortcut)
         sc.activated.connect(self._add_position)
 
+        # Cmd/Ctrl+Return (+ numpad Enter) starts the attack from anywhere in
+        # the session, mirroring Repeater's Send shortcut.
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            sc_start = QShortcut(QKeySequence(seq), self)
+            sc_start.setContext(Qt.WidgetWithChildrenShortcut)
+            sc_start.activated.connect(self._start)
+
         self._worker: Optional[_AttackWorker] = None
 
     # ---- position markers ----------------------------------------------
@@ -455,7 +469,7 @@ class IntruderSession(QWidget):
         cleaned = text.replace("§", "")
         # set_bytes routes through the editor's _render → setPlainText, which
         # fires textChanged so _rebuild_payload_panels picks the change up.
-        self._template.set_bytes(cleaned.encode("iso-8859-1", errors="replace"))
+        self._template.set_bytes(encode_http_text(cleaned))
 
     def _update_match_status(self) -> None:
         text = self._match_input.text()
@@ -494,13 +508,35 @@ class IntruderSession(QWidget):
             v = QVBoxLayout(wrap)
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(2)
+
+            header_row = QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
             label = QLabel(f"List {i+1}", self)
             label.setProperty("role", "section")
+            loader = MiniBurpComboBox(self)
+            loader.addItem("Load list…", None)
+            for key, name in payloads_module.names():
+                loader.addItem(name, key)
+                pl = payloads_module.get(key)
+                if pl is not None:
+                    loader.setItemData(loader.count() - 1, pl.description, Qt.ToolTipRole)
+            header_row.addWidget(label)
+            header_row.addStretch(1)
+            header_row.addWidget(loader)
+
             edit = QPlainTextEdit(self)
             edit.setPlaceholderText("One payload per line")
             if i < len(existing_texts):
                 edit.setPlainText(existing_texts[i])
-            v.addWidget(label)
+
+            def _load(_idx, e=edit, c=loader):
+                key = c.currentData()
+                if key:
+                    e.setPlainText("\n".join(payloads_module.payloads_for(key)))
+                    c.setCurrentIndex(0)  # reset picker to the "Load list…" prompt
+            loader.currentIndexChanged.connect(_load)
+
+            v.addLayout(header_row)
             v.addWidget(edit)
             self._payloads_layout.addWidget(wrap, 1)
             self._payload_edits.append(edit)
@@ -679,6 +715,11 @@ class IntruderTab(QWidget):
         self._tabs.tabBar().setAttribute(Qt.WA_StyledBackground, True)
         self._tabs.tabCloseRequested.connect(self._close)
 
+        root.addWidget(HintStrip(
+            "Wrap payload positions in <b>§…§</b> (⌘I), pick an attack mode, "
+            "use <b>Load list…</b> for a built-in payload set, then "
+            "<b>Start</b> (⌘↵). Click a result column header to sort."
+        ))
         root.addLayout(top)
         root.addWidget(self._tabs, 1)
 
@@ -701,14 +742,24 @@ class IntruderTab(QWidget):
         tx = STORE.get(tx_id)
         if not tx:
             return None
-        session = IntruderSession(
-            scheme=tx.scheme,
-            host=tx.host,
-            port=tx.port,
-            raw=tx.raw_request,
-            parent=self,
+        return self.new_session_from_bytes(
+            tx.scheme, tx.host, tx.port, tx.raw_request, label=f"#{tx.id} {tx.host}"
         )
-        return self._add(session, label=f"#{tx.id} {tx.host}")
+
+    def new_session_from_bytes(
+        self,
+        scheme: str,
+        host: str,
+        port: int,
+        raw: bytes,
+        label: Optional[str] = None,
+    ) -> IntruderSession:
+        """Seed a session from explicit bytes — used by 'Send to Intruder' from
+        the Intercept tab so the user's edited held bytes carry over."""
+        session = IntruderSession(
+            scheme=scheme, host=host, port=port, raw=bytes(raw), parent=self
+        )
+        return self._add(session, label=label)
 
     def _add(self, session: IntruderSession, label: Optional[str] = None) -> IntruderSession:
         self._counter += 1

@@ -117,12 +117,17 @@ on first run; nothing in this repo carries CA material.
 
 | Tab | What it does |
 | --- | --- |
-| **Proxy** | Filterable history with full-text search across URL, raw request, raw response, and the decoded response body (so `csrf-token` matches gzipped pages). Optional regex. Click any row to inspect the request / response, syntax-highlighted, with a hex toggle and Cmd-F find. Right-click → *Send to Repeater* / *Send to Intruder*. |
-| **Intercept** | Pause requests, edit raw bytes, forward or drop. Toggle from the toolbar. |
-| **Repeater** | Multi-tab editable request + response. Send on demand. Optional *Follow redirects* with standard HTTP semantics (301/302/303 → GET; 307/308 preserve method + body) and a minimal cookie jar so multi-hop login flows reach the final page; the hop chain is shown in the status bar. |
-| **Intruder** | 4 attack modes — Sniper, Battering-Ram, Pitchfork (lockstep lists), Cluster Bomb (cartesian product). Streams results into a live table. |
-| **Decoder** | Base64 / URL / hex / HTML-entity encode + decode. MD5 / SHA-1 / SHA-256 hashes. Chain output back to input. |
+| **Proxy** | Filterable history with full-text search across URL, raw request, raw response, and the decoded response body (so `csrf-token` matches gzipped pages). Optional regex. Click any row to inspect the request / response, syntax-highlighted, with a hex toggle, a **Render** view for HTML bodies, and Cmd-F find. Where your input echoes back in the response is **highlighted** with an *N reflected* badge. **Right-click** a row → *Send to Repeater* / *Send to Intruder*, *Copy URL*, *Copy request*, *Copy as curl*; **double-click** sends to Repeater. |
+| **Intercept** | Pause requests, edit raw bytes (or as a **Params** key/value table), forward or drop. *Auto Content-Length* keeps an edited body's length honest. *Send to Repeater / Intruder* carries your edits across. Forward `⌘↵` / Drop `⌘⌫`. Only **in-scope** requests are held. |
+| **Repeater** | Multi-tab editable request + response. Send with `⌘↵`. Step through every past send (`◀ n/m ▶`) and **Diff** their response bodies. Optional *Update CL* recomputes Content-Length after a body edit. Optional *Follow redirects* with standard HTTP semantics (301/302/303 → GET; 307/308 preserve method + body) and a minimal cookie jar so multi-hop login flows reach the final page; the hop chain is shown in the status bar. |
+| **Intruder** | 4 attack modes — Sniper, Battering-Ram, Pitchfork (lockstep lists), Cluster Bomb (cartesian product). *Load list…* fills a payload panel from the built-in library. Start with `⌘↵`. Streams results into a live, sortable table. |
+| **Decoder** | Base64 / URL / hex / HTML-entity encode + decode. MD5 / SHA-1 / SHA-256 hashes. Chain output back to input. The same ops are available by **right-clicking a selection** in any request editor. |
+| **Match/Replace** | Standing find/replace (literal or regex) applied to every in-scope request before forwarding — inject a header, rewrite a cookie, swap a path/parameter. |
 | **Scope** | Glob allowlist (`*.web-security-academy.net`) for filtering history and intercept. |
+
+The toolbar also has **Save session… / Load session…** to write history to a
+JSON file and reload it (raw bytes base64-encoded). Saved files contain full
+request/response bodies — treat them as sensitive and don't commit them.
 
 ## Themes
 
@@ -147,6 +152,12 @@ MiniBurp/
 │   ├── storage.py              # thread-safe in-memory transaction store
 │   ├── intercept.py            # pause / edit / forward / drop coordinator
 │   ├── scope.py                # host allowlist (fnmatch globs)
+│   ├── rules.py                # Match & Replace request engine
+│   ├── params.py               # request query/cookie/body parse + serialize
+│   ├── reflect.py              # extract request inputs to highlight reflections
+│   ├── payloads.py             # bundled, described payload library
+│   ├── curl.py                 # render a request as a curl command
+│   ├── session_io.py           # save / restore history to JSON
 │   ├── bodydecode.py           # gzip / deflate / brotli body decoding
 │   ├── browser.py              # Chromium auto-launch through the proxy
 │   ├── decoder.py              # Base64, URL, hex, hash ops

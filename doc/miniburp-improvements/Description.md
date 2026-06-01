@@ -108,8 +108,17 @@ add `*.web-security-academy.net` to Scope.
 
 ## Verification
 
-`pytest` — 180 passed, 1 skipped. `flake8 --select=E9,F63,F7,F82` — clean. Headless
+`pytest` — 184 passed, 1 skipped. `flake8 --select=E9,F63,F7,F82` — clean. Headless
 (offscreen) MainWindow smoke builds every tab under both themes.
+
+A self-review of the full diff caught and fixed 4 bugs (final commit), each with a
+regression test:
+- Match & Replace rule that *empties* a body left a stale Content-Length (would hang
+  upstream) — now recomputed to 0.
+- `params` request-line rebuild corrupted non-canonical (double-space) lines and dropped
+  scheme+authority on absolute-form targets — now split on whitespace runs and preserve
+  scheme/host.
+- `Transaction.duration_ms` crashed on a session file with a null `started_at` — guarded.
 
 ## Promotion target
 

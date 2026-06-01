@@ -3,7 +3,7 @@ Tests for the request parameter parse/serialize layer (params.py).
 """
 from __future__ import annotations
 
-from miniburp.params import Param, apply_params, parse_params
+from miniburp.params import apply_params, parse_params
 
 
 def test_parses_query_cookie_and_body():

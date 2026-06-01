@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
-from ...sender import send_raw, send_with_redirects
+from ...sender import recompute_content_length, send_raw, send_with_redirects
 from ...storage import STORE
 from ..widgets.combobox import MiniBurpComboBox
 from ..widgets.http_viewer import HttpEditor, HttpViewer
@@ -106,6 +106,14 @@ class RepeaterSession(QWidget):
         )
         target_row.addWidget(self._follow_check)
 
+        self._cl_check = QCheckBox("Update CL", self)
+        self._cl_check.setToolTip(
+            "Recompute Content-Length to match the body before sending.\n"
+            "Off by default — Repeater ships exactly what you typed (Burp-style);\n"
+            "turn on after editing a body so it isn't truncated server-side."
+        )
+        target_row.addWidget(self._cl_check)
+
         target_row.addWidget(QLabel("Max:", self))
         self._max_redirects = QSpinBox(self)
         self._max_redirects.setRange(1, 20)
@@ -154,11 +162,14 @@ class RepeaterSession(QWidget):
             return
         self._send_btn.setEnabled(False)
         self._status_label.setText("Sending…")
+        raw = self._req_editor.bytes_value()
+        if self._cl_check.isChecked():
+            raw = recompute_content_length(raw)
         worker = _SendWorker(
             self._host.text().strip(),
             int(self._port.value()),
             self._scheme.currentText(),
-            self._req_editor.bytes_value(),
+            raw,
             follow_redirects=self._follow_check.isChecked(),
             max_redirects=int(self._max_redirects.value()),
         )

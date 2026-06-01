@@ -26,6 +26,8 @@ from . import ca
 from .http_io import (
     HTTPParseError,
     build_request_bytes,
+    ensure_content_length,
+    parse_status_code,
     read_request,
     read_response,
 )
@@ -150,6 +152,7 @@ class ProxyHandler:
         forwarded_start = f"{method} {rel} {version}"
         forwarded_headers = _sanitize_headers_for_forward(headers)
         forwarded_headers.setdefault("Host", host if port == 80 else f"{host}:{port}")
+        ensure_content_length(forwarded_headers, body)
         upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
 
         tx = STORE.add(
@@ -185,7 +188,7 @@ class ProxyHandler:
         try:
             upstream.sendall(upstream_request)
             resp_start, resp_headers, resp_body, raw_resp = read_response(upstream)
-            status = int(resp_start.split(" ", 2)[1])
+            status = parse_status_code(resp_start)
             STORE.update(
                 tx.id,
                 status=status,
@@ -298,8 +301,11 @@ class ProxyHandler:
                 start_line2, headers2, body2, _raw = parsed
                 try:
                     self._forward_https(tls_client, host, port, start_line2, headers2, body2)
-                except HTTPParseError as e:
-                    print(f"[proxy] upstream parse error: {e}")
+                except (HTTPParseError, ValueError, OSError, ssl.SSLError) as e:
+                    # One malformed message (bad status line, dropped upstream,
+                    # half-broken endpoint) ends this connection cleanly instead
+                    # of escaping to handle()'s blanket except as a traceback.
+                    print(f"[proxy] upstream error on {host}: {e}")
                     break
                 # Honor client Connection: close.
                 if headers2.get("Connection", "").lower() == "close":
@@ -326,6 +332,7 @@ class ProxyHandler:
         forwarded_start = f"{method} {rel} {version}"
         forwarded_headers = _sanitize_headers_for_forward(headers)
         forwarded_headers.setdefault("Host", host if port == 443 else f"{host}:{port}")
+        ensure_content_length(forwarded_headers, body)
         upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
 
         tx = STORE.add(
@@ -372,7 +379,7 @@ class ProxyHandler:
         try:
             upstream.sendall(upstream_request)
             resp_start, resp_headers, resp_body, raw_resp = read_response(upstream)
-            status = int(resp_start.split(" ", 2)[1])
+            status = parse_status_code(resp_start)
             STORE.update(
                 tx.id,
                 status=status,

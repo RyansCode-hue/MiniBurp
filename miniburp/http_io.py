@@ -170,3 +170,37 @@ def build_request_bytes(start_line: str, headers: dict[str, str], body: bytes) -
 
 def build_response_bytes(start_line: str, headers: dict[str, str], body: bytes) -> bytes:
     return build_request_bytes(start_line, headers, body)  # same shape
+
+
+def ensure_content_length(headers: dict[str, str], body: bytes) -> dict[str, str]:
+    """Set ``Content-Length`` to ``len(body)`` when a body is present and no
+    Content-Length header survived.
+
+    Mutates and returns ``headers`` for convenience. This is the request-side
+    mirror of what the response path already does: ``read_request`` decodes a
+    ``Transfer-Encoding: chunked`` body into plain bytes and the proxy strips
+    ``transfer-encoding`` when forwarding, leaving a body with no length
+    declaration. Without this, upstream treats the request as zero-length
+    (dropping the payload) or reads until close. No-op for empty bodies or
+    when a Content-Length is already present (case-insensitive).
+    """
+    if not body:
+        return headers
+    for k in headers:
+        if k.lower() == "content-length":
+            return headers
+    headers["Content-Length"] = str(len(body))
+    return headers
+
+
+def parse_status_code(status_line: str) -> Optional[int]:
+    """Pull the numeric status out of a response start line, tolerantly.
+
+    Returns ``None`` for a truncated or non-standard status line (e.g.
+    ``HTTP/1.1`` with no code) instead of raising — a single malformed
+    upstream response shouldn't tear down a keep-alive connection.
+    """
+    try:
+        return int(status_line.split(" ", 2)[1])
+    except (IndexError, ValueError):
+        return None

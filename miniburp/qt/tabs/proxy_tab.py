@@ -22,11 +22,13 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSplitter,
     QTableView,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
+from ...curl import to_curl
 from ...scope import SCOPE
 from ...storage import STORE
 from ..signals import StoreBridge
@@ -391,6 +394,12 @@ class ProxyTab(QWidget):
         self._repeater_btn.clicked.connect(lambda: self._emit_selected(self.send_to_repeater))
         self._intruder_btn.clicked.connect(lambda: self._emit_selected(self.send_to_intruder))
 
+        # Right-click actions on a history row (README documents these) plus
+        # double-click → Repeater for the common "grab this and iterate" move.
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
+        self._table.doubleClicked.connect(self._on_double_click)
+
     # ---- slots ---------------------------------------------------------
     def _apply_filters(self) -> None:
         mi = self._method_combo.currentIndex()
@@ -470,3 +479,49 @@ class ProxyTab(QWidget):
         row = idx.data(Qt.UserRole)
         if isinstance(row, dict) and row.get("id") is not None:
             sig.emit(row["id"])
+
+    # ---- context menu / double-click -----------------------------------
+    def _tx_id_at(self, index: QModelIndex) -> Optional[int]:
+        if not index.isValid():
+            return None
+        row = index.data(Qt.UserRole)
+        return row.get("id") if isinstance(row, dict) else None
+
+    def _on_double_click(self, index: QModelIndex) -> None:
+        tx_id = self._tx_id_at(index)
+        if tx_id is not None:
+            self.send_to_repeater.emit(tx_id)
+
+    def _show_context_menu(self, pos) -> None:
+        index = self._table.indexAt(pos)
+        if index.isValid():
+            # Select the row under the cursor so the action targets it even if
+            # the user right-clicked a different row than the selected one.
+            self._table.selectRow(index.row())
+        tx_id = self._tx_id_at(self._table.currentIndex())
+        tx = STORE.get(tx_id) if tx_id is not None else None
+        if tx is None:
+            return
+
+        menu = QMenu(self)
+        act_rep = menu.addAction("Send to Repeater")
+        act_intr = menu.addAction("Send to Intruder")
+        menu.addSeparator()
+        act_url = menu.addAction("Copy URL")
+        act_req = menu.addAction("Copy request")
+        act_curl = menu.addAction("Copy as curl")
+
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        clip = QApplication.clipboard()
+        if chosen is act_rep:
+            self.send_to_repeater.emit(tx.id)
+        elif chosen is act_intr:
+            self.send_to_intruder.emit(tx.id)
+        elif chosen is act_url:
+            clip.setText(tx.url)
+        elif chosen is act_req:
+            clip.setText((tx.raw_request or b"").decode("iso-8859-1", errors="replace"))
+        elif chosen is act_curl:
+            clip.setText(to_curl(tx.method, tx.url, tx.req_headers, tx.req_body))

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ... import decoder as decoder_module
 from ...http_io import encode_http_text
 from ..syntax import HttpHighlighter
 from .find_bar import FindBar
@@ -57,6 +58,25 @@ class _CodeEdit(QPlainTextEdit):
         font.setStyleHint(QFont.Monospace)
         self.setFont(font)
         self.setTabChangesFocus(False)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Standard menu plus, for editable panes with a selection, an
+        Encode/Decode submenu that transforms the selection in place — so you
+        can URL-encode a payload or Base64 a cookie without leaving for the
+        Decoder tab."""
+        menu = self.createStandardContextMenu()
+        cursor = self.textCursor()
+        ops: dict = {}
+        if not self.isReadOnly() and cursor.hasSelection():
+            menu.addSeparator()
+            sub = menu.addMenu("Encode / Decode selection")
+            for key, label in decoder_module.OPS:
+                ops[sub.addAction(label)] = key
+        chosen = menu.exec(event.globalPos())
+        if chosen in ops:
+            result, error = decoder_module.run(ops[chosen], cursor.selectedText())
+            if not error:
+                cursor.insertText(result)
 
 
 class HttpViewer(QWidget):

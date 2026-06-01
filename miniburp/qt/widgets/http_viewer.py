@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import decoder as decoder_module
+from ... import payloads as payloads_module
 from ...http_io import encode_http_text
 from ..syntax import HttpHighlighter
 from .find_bar import FindBar
@@ -67,16 +68,27 @@ class _CodeEdit(QPlainTextEdit):
         menu = self.createStandardContextMenu()
         cursor = self.textCursor()
         ops: dict = {}
-        if not self.isReadOnly() and cursor.hasSelection():
+        payload_actions: dict = {}
+        if not self.isReadOnly():
+            if cursor.hasSelection():
+                menu.addSeparator()
+                sub = menu.addMenu("Encode / Decode selection")
+                for key, label in decoder_module.OPS:
+                    ops[sub.addAction(label)] = key
             menu.addSeparator()
-            sub = menu.addMenu("Encode / Decode selection")
-            for key, label in decoder_module.OPS:
-                ops[sub.addAction(label)] = key
+            pmenu = menu.addMenu("Insert payload")
+            for key, name in payloads_module.names():
+                cat = pmenu.addMenu(name)
+                for p in payloads_module.payloads_for(key):
+                    # '&' is a Qt menu mnemonic — escape it in the label only.
+                    payload_actions[cat.addAction(p.replace("&", "&&"))] = p
         chosen = menu.exec(event.globalPos())
         if chosen in ops:
             result, error = decoder_module.run(ops[chosen], cursor.selectedText())
             if not error:
                 cursor.insertText(result)
+        elif chosen in payload_actions:
+            cursor.insertText(payload_actions[chosen])
 
 
 class HttpViewer(QWidget):

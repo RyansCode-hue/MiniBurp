@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
+from ... import payloads as payloads_module
 from ...http_io import encode_http_text
 from ...sender import recompute_content_length, send_raw
 from ...storage import STORE
@@ -506,13 +507,35 @@ class IntruderSession(QWidget):
             v = QVBoxLayout(wrap)
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(2)
+
+            header_row = QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
             label = QLabel(f"List {i+1}", self)
             label.setProperty("role", "section")
+            loader = MiniBurpComboBox(self)
+            loader.addItem("Load list…", None)
+            for key, name in payloads_module.names():
+                loader.addItem(name, key)
+                pl = payloads_module.get(key)
+                if pl is not None:
+                    loader.setItemData(loader.count() - 1, pl.description, Qt.ToolTipRole)
+            header_row.addWidget(label)
+            header_row.addStretch(1)
+            header_row.addWidget(loader)
+
             edit = QPlainTextEdit(self)
             edit.setPlaceholderText("One payload per line")
             if i < len(existing_texts):
                 edit.setPlainText(existing_texts[i])
-            v.addWidget(label)
+
+            def _load(_idx, e=edit, c=loader):
+                key = c.currentData()
+                if key:
+                    e.setPlainText("\n".join(payloads_module.payloads_for(key)))
+                    c.setCurrentIndex(0)  # reset picker to the "Load list…" prompt
+            loader.currentIndexChanged.connect(_load)
+
+            v.addLayout(header_row)
             v.addWidget(edit)
             self._payloads_layout.addWidget(wrap, 1)
             self._payload_edits.append(edit)

@@ -6,6 +6,7 @@ Each session is its own sub-tab inside this widget. A session has a target
 """
 from __future__ import annotations
 
+import difflib
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -132,6 +133,28 @@ class RepeaterSession(QWidget):
         self._status_label.setProperty("role", "muted")
         target_row.addWidget(self._status_label)
 
+        target_row.addStretch(1)
+
+        # ---- response history nav (◀ n/m ▶ + Diff) ----
+        # Each send is kept so the user can step back and compare payloads
+        # without re-sending. Diff shows the body delta vs the previous entry.
+        self._prev_btn = QPushButton("◀", self)
+        self._prev_btn.setFixedWidth(34)
+        self._prev_btn.setToolTip("Previous response")
+        self._hist_label = QLabel("0/0", self)
+        self._hist_label.setProperty("role", "muted")
+        self._next_btn = QPushButton("▶", self)
+        self._next_btn.setFixedWidth(34)
+        self._next_btn.setToolTip("Next response")
+        self._diff_check = QCheckBox("Diff", self)
+        self._diff_check.setToolTip(
+            "Show a line diff of this response's body against the previous send."
+        )
+        target_row.addWidget(self._prev_btn)
+        target_row.addWidget(self._hist_label)
+        target_row.addWidget(self._next_btn)
+        target_row.addWidget(self._diff_check)
+
         # ---- splitter: request | response ----
         self._req_editor = HttpEditor("Request (editable)", parent=self)
         self._req_editor.set_bytes(raw, title="Request (editable)")
@@ -147,7 +170,15 @@ class RepeaterSession(QWidget):
         root.addWidget(split, 1)
 
         self._worker: Optional[_SendWorker] = None
+        self._pending_raw: bytes = b""
+        # Per-session send history: each entry is {"request": bytes, "result": dict}.
+        self._history: list[dict] = []
+        self._hist_index = -1
         self._send_btn.clicked.connect(self._send)
+        self._prev_btn.clicked.connect(lambda: self._step_history(-1))
+        self._next_btn.clicked.connect(lambda: self._step_history(1))
+        self._diff_check.toggled.connect(self._render_current)
+        self._update_nav()
 
         # Cmd/Ctrl+Return (and numpad Enter) sends, even while the cursor is in
         # the request editor — the tight edit-then-send loop shouldn't require
@@ -165,6 +196,7 @@ class RepeaterSession(QWidget):
         raw = self._req_editor.bytes_value()
         if self._cl_check.isChecked():
             raw = recompute_content_length(raw)
+        self._pending_raw = raw
         worker = _SendWorker(
             self._host.text().strip(),
             int(self._port.value()),
@@ -184,13 +216,20 @@ class RepeaterSession(QWidget):
         # a deleted C++ QThread and the click silently no-ops.
         self._worker = None
         self._send_btn.setEnabled(True)
+        self._history.append({"request": self._pending_raw, "result": result})
+        self._hist_index = len(self._history) - 1
+        self._update_nav()
+        self._render_current()
+
+    # ---- response rendering + history nav ------------------------------
+    def _format_result(self, result: dict) -> tuple[str, bytes, str]:
+        """Return (status_text, display_bytes, title) for a result dict."""
         if result.get("error"):
-            self._status_label.setText(f"error: {result['error']}")
-            self._res_viewer.set_bytes(
+            return (
+                f"error: {result['error']}",
                 f"ERROR: {result['error']}".encode(),
-                title="Response (error)",
+                "Response (error)",
             )
-            return
         status = result.get("status")
         dur = result.get("duration_ms", 0)
         body = result.get("body", b"")
@@ -206,7 +245,7 @@ class RepeaterSession(QWidget):
             suffix = f" · {hops} hop{'s' if hops != 1 else ''}: {arrow} · {total} ms total"
             if result.get("truncated"):
                 suffix += " · max-redirects reached"
-        self._status_label.setText(f"status {status} · {len(body)} bytes · {dur} ms{suffix}")
+        status_text = f"status {status} · {len(body)} bytes · {dur} ms{suffix}"
 
         decoded, note = bodydecode.decode_body(body, result.get("headers", {}))
         raw = result.get("raw", b"")
@@ -218,7 +257,60 @@ class RepeaterSession(QWidget):
         title = f"Response  [status {status}]"
         if note:
             title += f"  [body decode: {note}]"
+        return status_text, display, title
+
+    def _render_current(self) -> None:
+        if not self._history:
+            return
+        result = self._history[self._hist_index]["result"]
+        status_text, display, title = self._format_result(result)
+
+        if (
+            self._diff_check.isChecked()
+            and self._hist_index > 0
+            and not result.get("error")
+        ):
+            prev = self._history[self._hist_index - 1]["result"]
+            cur_dec, _ = bodydecode.decode_body(result.get("body", b""), result.get("headers", {}))
+            prev_dec, _ = bodydecode.decode_body(prev.get("body", b""), prev.get("headers", {}))
+            diff = difflib.unified_diff(
+                prev_dec.decode("iso-8859-1", errors="replace").splitlines(),
+                cur_dec.decode("iso-8859-1", errors="replace").splitlines(),
+                fromfile=f"send #{self._hist_index}",
+                tofile=f"send #{self._hist_index + 1}",
+                lineterm="",
+            )
+            diff_text = "\n".join(diff) or "(no differences in the decoded body)"
+            self._status_label.setText(status_text + " · diff vs previous")
+            self._res_viewer.set_bytes(
+                diff_text.encode("utf-8", errors="replace"),
+                title="Diff vs previous response",
+            )
+            return
+
+        self._status_label.setText(status_text)
         self._res_viewer.set_bytes(display, title=title)
+
+    def _step_history(self, delta: int) -> None:
+        new = self._hist_index + delta
+        if not self._history or new < 0 or new >= len(self._history):
+            return
+        self._hist_index = new
+        # Restore the request that produced this response so the two panes
+        # stay in sync as the user steps back through payload variants.
+        req = self._history[new].get("request") or b""
+        if req:
+            self._req_editor.set_bytes(req, title="Request (editable)")
+        self._update_nav()
+        self._render_current()
+
+    def _update_nav(self) -> None:
+        n = len(self._history)
+        shown = self._hist_index + 1 if n else 0
+        self._hist_label.setText(f"{shown}/{n}")
+        self._prev_btn.setEnabled(self._hist_index > 0)
+        self._next_btn.setEnabled(0 <= self._hist_index < n - 1)
+        self._diff_check.setEnabled(n > 1)
 
 
 class RepeaterTab(QWidget):

@@ -95,3 +95,39 @@ def test_intercept_send_to_repeater_carries_edited_bytes(app):
     finally:
         w.close()
         STORE.clear()
+
+
+def test_repeater_session_history_and_diff(app):
+    from miniburp.qt.tabs.repeater_tab import RepeaterSession
+
+    s = RepeaterSession(
+        scheme="https", host="lab.net", port=443,
+        raw=b"GET / HTTP/1.1\r\nHost: lab.net\r\n\r\n",
+    )
+    try:
+        s._pending_raw = b"GET /a HTTP/1.1\r\nHost: lab.net\r\n\r\n"
+        s._on_response({
+            "error": None, "status": 200, "headers": {}, "body": b"line1\nline2",
+            "raw": b"HTTP/1.1 200 OK\r\n\r\nline1\nline2", "duration_ms": 5,
+        })
+        assert s._hist_label.text() == "1/1"
+
+        s._pending_raw = b"GET /b HTTP/1.1\r\nHost: lab.net\r\n\r\n"
+        s._on_response({
+            "error": None, "status": 200, "headers": {}, "body": b"line1\nCHANGED",
+            "raw": b"HTTP/1.1 200 OK\r\n\r\nline1\nCHANGED", "duration_ms": 6,
+        })
+        assert s._hist_label.text() == "2/2"
+
+        # Stepping back restores the request that produced response #1.
+        s._step_history(-1)
+        assert s._hist_label.text() == "1/2"
+        assert b"/a" in s._req_editor.bytes_value()
+
+        # Diff on the second send shows the body delta.
+        s._step_history(1)
+        s._diff_check.setChecked(True)
+        assert b"CHANGED" in s._res_viewer._raw_bytes
+        assert b"-line2" in s._res_viewer._raw_bytes
+    finally:
+        s.deleteLater()

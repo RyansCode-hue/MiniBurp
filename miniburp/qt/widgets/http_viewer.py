@@ -14,15 +14,19 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
 from ... import decoder as decoder_module
+from ... import params as params_module
 from ... import payloads as payloads_module
 from ...http_io import encode_http_text
 from ..syntax import HttpHighlighter
@@ -137,6 +141,18 @@ class HttpViewer(QWidget):
             self._render_btn.setToolTip("Render the HTML body as a page (no network)")
             self._render_btn.toggled.connect(self._on_render_toggled)
             header.addWidget(self._render_btn)
+        # Params is an editable-only affordance: a key/value table for the
+        # query string, cookies, and urlencoded body.
+        self._params_btn: Optional[QPushButton] = None
+        if editable:
+            self._params_btn = QPushButton("Params", self)
+            self._params_btn.setCheckable(True)
+            self._params_btn.setMinimumWidth(64)
+            self._params_btn.setToolTip(
+                "Edit query / cookie / body parameters as a table"
+            )
+            self._params_btn.toggled.connect(self._toggle_params)
+            header.addWidget(self._params_btn)
         header.addWidget(self._hex_btn)
 
         # --- editor ---
@@ -155,6 +171,23 @@ class HttpViewer(QWidget):
             self._render_view.setOpenLinks(False)
             self._render_view.hide()
 
+        # --- params table (editable viewers only) ---
+        self._params_table: Optional[QTableWidget] = None
+        self._params: list = []
+        self._params_syncing = False
+        if editable:
+            self._params_table = QTableWidget(0, 3, self)
+            self._params_table.setHorizontalHeaderLabels(["Where", "Name", "Value"])
+            self._params_table.verticalHeader().setVisible(False)
+            ph = self._params_table.horizontalHeader()
+            ph.setSectionResizeMode(QHeaderView.Interactive)
+            ph.setStretchLastSection(True)
+            self._params_table.setColumnWidth(0, 70)
+            self._params_table.setColumnWidth(1, 170)
+            self._params_table.setMaximumHeight(180)
+            self._params_table.hide()
+            self._params_table.itemChanged.connect(self._on_param_item_changed)
+
         # --- find bar (hidden until Cmd-F) ---
         self.find_bar = FindBar(self)
         self.find_bar.attach(self.edit)
@@ -163,6 +196,8 @@ class HttpViewer(QWidget):
         root.addWidget(self.edit, 1)
         if self._render_view is not None:
             root.addWidget(self._render_view, 1)
+        if self._params_table is not None:
+            root.addWidget(self._params_table)
         root.addWidget(self.find_bar)
 
     # ---- public API ----------------------------------------------------
@@ -211,6 +246,43 @@ class HttpViewer(QWidget):
         """Wash-highlight occurrences of request input in this response view."""
         if self.highlighter is not None:
             self.highlighter.set_needles(needles)
+
+    # ---- params panel --------------------------------------------------
+    def _toggle_params(self, on: bool) -> None:
+        if self._params_table is None:
+            return
+        if on:
+            self._rebuild_params_table()
+        self._params_table.setVisible(on)
+
+    def _rebuild_params_table(self) -> None:
+        self._params = params_module.parse_params(self.bytes_value())
+        self._params_syncing = True
+        t = self._params_table
+        t.setRowCount(0)
+        t.setRowCount(len(self._params))
+        for r, p in enumerate(self._params):
+            where = QTableWidgetItem(p.location)
+            where.setFlags(Qt.ItemIsEnabled)
+            name = QTableWidgetItem(p.name)
+            name.setFlags(Qt.ItemIsEnabled)
+            value = QTableWidgetItem(p.value)  # the only editable column
+            t.setItem(r, 0, where)
+            t.setItem(r, 1, name)
+            t.setItem(r, 2, value)
+        self._params_syncing = False
+
+    def _on_param_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._params_syncing or item.column() != 2:
+            return
+        row = item.row()
+        if not (0 <= row < len(self._params)):
+            return
+        self._params[row].value = item.text()
+        # Write the edit back into the raw request, then re-sync the table.
+        new_raw = params_module.apply_params(self.bytes_value(), self._params)
+        self.set_bytes(new_raw)
+        self._rebuild_params_table()
 
     # ---- internals -----------------------------------------------------
     def _looks_like_html(self) -> bool:

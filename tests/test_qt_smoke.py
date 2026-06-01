@@ -154,3 +154,21 @@ def test_render_mode_only_for_html_readonly(app):
     # Editable editors don't get a render affordance at all.
     e = HttpEditor("Request")
     assert e._render_btn is None and e._render_view is None
+
+
+def test_param_grid_edits_write_back_to_raw(app):
+    from miniburp.qt.widgets.http_viewer import HttpEditor, HttpViewer
+
+    e = HttpEditor("Request")
+    e.set_bytes(b"GET /image?filename=10.jpg HTTP/1.1\r\nHost: lab.net\r\n\r\n")
+    e._params_btn.setChecked(True)  # reveal the Params table
+    t = e._params_table
+    assert t.rowCount() == 1
+    assert t.item(0, 1).text() == "filename"
+    # Editing the value cell rewrites the raw request; slashes stay literal.
+    t.item(0, 2).setText("../../../etc/passwd")
+    assert b"GET /image?filename=../../../etc/passwd HTTP/1.1" in e.bytes_value()
+
+    # Read-only viewers have no params panel.
+    v = HttpViewer("Response", editable=False)
+    assert v._params_btn is None and v._params_table is None

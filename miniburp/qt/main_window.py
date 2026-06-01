@@ -548,19 +548,25 @@ class MainWindow(QMainWindow):
         self._intercept_action = QAction("Intercept: OFF", self)
         self._intercept_action.setCheckable(True)
         self._clear_action = QAction("Clear history", self)
+        self._save_session_action = QAction("Save session…", self)
+        self._load_session_action = QAction("Load session…", self)
         self._save_ca_action = QAction("Save CA…", self)
         self._theme_action = QAction(self._theme_action_label(), self)
         # Qt auto-derives a tooltip from QAction.text() and shows it on
         # hover in the toolbar. With the text already visible on the button
         # the tooltip just duplicates it — kill them.
         for act in (self._launch_action, self._intercept_action,
-                    self._clear_action, self._save_ca_action, self._theme_action):
+                    self._clear_action, self._save_session_action,
+                    self._load_session_action, self._save_ca_action,
+                    self._theme_action):
             act.setToolTip("")
 
         tb.addAction(self._launch_action)
         tb.addAction(self._intercept_action)
         tb.addSeparator()
         tb.addAction(self._clear_action)
+        tb.addAction(self._save_session_action)
+        tb.addAction(self._load_session_action)
         tb.addAction(self._save_ca_action)
 
         # Expanding spacer pushes the status indicators to the right edge.
@@ -612,6 +618,8 @@ class MainWindow(QMainWindow):
         self._launch_action.triggered.connect(self._launch_browser)
         self._intercept_action.toggled.connect(self._toggle_intercept)
         self._clear_action.triggered.connect(STORE.clear)
+        self._save_session_action.triggered.connect(self._save_session)
+        self._load_session_action.triggered.connect(self._load_session)
         self._save_ca_action.triggered.connect(self._save_ca)
         self._theme_action.triggered.connect(self._toggle_theme)
 
@@ -801,6 +809,36 @@ class MainWindow(QMainWindow):
         INTERCEPT.set_enabled(on)
         self._intercept_action.setText(f"Intercept: {'ON' if on else 'OFF'}")
         self._sb_label.setText(f"Intercept {'enabled' if on else 'disabled'}")
+
+    def _save_session(self) -> None:
+        from ..session_io import dump_transactions
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Save session", "miniburp-session.json",
+            "MiniBurp session (*.json)",
+        )
+        if not target:
+            return
+        try:
+            txs = STORE.all()
+            Path(target).write_bytes(dump_transactions(txs))
+            self._sb_label.setText(f"Session saved ({len(txs)} request(s)) → {target}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", str(e))
+
+    def _load_session(self) -> None:
+        from ..session_io import load_transactions
+        target, _ = QFileDialog.getOpenFileName(
+            self, "Load session", "", "MiniBurp session (*.json)"
+        )
+        if not target:
+            return
+        try:
+            items = load_transactions(Path(target).read_bytes())
+        except Exception as e:
+            QMessageBox.critical(self, "Load failed", str(e))
+            return
+        STORE.load(items)
+        self._sb_label.setText(f"Session loaded ({len(items)} request(s))")
 
     def _save_ca(self) -> None:
         target, _ = QFileDialog.getSaveFileName(

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -116,6 +117,7 @@ class RepeaterSession(QWidget):
         self._send_btn = QPushButton("Send", self)
         self._send_btn.setProperty("role", "primary")
         self._send_btn.setMinimumWidth(90)
+        self._send_btn.setToolTip("Send the request  (⌘↵ / Ctrl+Enter)")
         target_row.addWidget(self._send_btn)
 
         self._status_label = QLabel("", self)
@@ -138,6 +140,14 @@ class RepeaterSession(QWidget):
 
         self._worker: Optional[_SendWorker] = None
         self._send_btn.clicked.connect(self._send)
+
+        # Cmd/Ctrl+Return (and numpad Enter) sends, even while the cursor is in
+        # the request editor — the tight edit-then-send loop shouldn't require
+        # reaching for the mouse. Scoped to this session widget.
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(self._send)
 
     def _send(self) -> None:
         if self._worker is not None and self._worker.isRunning():

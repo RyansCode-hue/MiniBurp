@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -57,8 +58,10 @@ class _HoldPane(QWidget):
         btn_row = QHBoxLayout()
         self._forward_btn = QPushButton("Forward", self)
         self._forward_btn.setProperty("role", "primary")
+        self._forward_btn.setToolTip("Forward this request  (⌘↵ / Ctrl+Enter)")
         self._drop_btn = QPushButton("Drop", self)
         self._drop_btn.setProperty("role", "danger")
+        self._drop_btn.setToolTip("Drop this request  (⌘⌫ / Ctrl+Backspace)")
         btn_row.addWidget(self._forward_btn)
         btn_row.addWidget(self._drop_btn)
         btn_row.addStretch(1)
@@ -69,6 +72,16 @@ class _HoldPane(QWidget):
 
         self._forward_btn.clicked.connect(self._forward)
         self._drop_btn.clicked.connect(self._drop)
+
+        # Forward / Drop without leaving the keyboard. Scoped to this pane so an
+        # intercept-heavy lab can be cleared by hand quickly.
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(self._forward)
+        sc_drop = QShortcut(QKeySequence("Ctrl+Backspace"), self)
+        sc_drop.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_drop.activated.connect(self._drop)
 
     def _forward(self) -> None:
         INTERCEPT.forward(self._tx_id, self.editor.bytes_value())

@@ -307,6 +307,7 @@ class IntruderSession(QWidget):
 
         self._start_btn = QPushButton("Start attack", self)
         self._start_btn.setProperty("role", "primary")
+        self._start_btn.setToolTip("Start the attack  (⌘↵ / Ctrl+Enter)")
         self._stop_btn = QPushButton("Stop", self)
         self._stop_btn.setEnabled(False)
         controls.addWidget(self._start_btn, 1, 7)
@@ -430,6 +431,13 @@ class IntruderSession(QWidget):
         sc = QShortcut(QKeySequence("Ctrl+I"), self._template.edit)
         sc.setContext(Qt.WidgetWithChildrenShortcut)
         sc.activated.connect(self._add_position)
+
+        # Cmd/Ctrl+Return (+ numpad Enter) starts the attack from anywhere in
+        # the session, mirroring Repeater's Send shortcut.
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            sc_start = QShortcut(QKeySequence(seq), self)
+            sc_start.setContext(Qt.WidgetWithChildrenShortcut)
+            sc_start.activated.connect(self._start)
 
         self._worker: Optional[_AttackWorker] = None
 

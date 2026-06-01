@@ -38,7 +38,8 @@ def test_mainwindow_builds_all_tabs(app):
     try:
         tab_titles = [w._tabs.tabText(i) for i in range(w._tabs.count())]
         assert tab_titles == [
-            "Proxy", "Intercept", "Repeater", "Intruder", "Decoder", "Scope"
+            "Proxy", "Intercept", "Repeater", "Intruder",
+            "Decoder", "Match/Replace", "Scope",
         ]
         # Both stylesheets apply without a QSS format KeyError.
         for name in THEMES:

@@ -42,6 +42,7 @@ from .tabs.intercept_tab import InterceptTab
 from .tabs.intruder_tab import IntruderTab
 from .tabs.proxy_tab import ProxyTab
 from .tabs.repeater_tab import RepeaterTab
+from .tabs.rules_tab import RulesTab
 from .tabs.scope_tab import ScopeTab
 
 
@@ -597,6 +598,7 @@ class MainWindow(QMainWindow):
         self.repeater_tab = RepeaterTab(self)
         self.intruder_tab = IntruderTab(self)
         self.decoder_tab = DecoderTab(self)
+        self.rules_tab = RulesTab(self)
         self.scope_tab = ScopeTab(self)
 
         self._tabs.addTab(self.proxy_tab, "Proxy")
@@ -604,6 +606,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self.repeater_tab, "Repeater")
         self._tabs.addTab(self.intruder_tab, "Intruder")
         self._tabs.addTab(self.decoder_tab, "Decoder")
+        self._tabs.addTab(self.rules_tab, "Match/Replace")
         self._tabs.addTab(self.scope_tab, "Scope")
 
         self.setCentralWidget(self._tabs)

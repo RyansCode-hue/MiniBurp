@@ -34,7 +34,9 @@ from .http_io import (
 )
 from .intercept import INTERCEPT, InterceptResult
 from .noise import is_noise
+from .rules import RULES
 from .scope import SCOPE
+from .sender import recompute_content_length
 from .storage import STORE
 
 
@@ -69,6 +71,20 @@ def _absolute_to_relative(path_or_url: str) -> tuple[str, Optional[str], Optiona
             rel += "?" + parts.query
         return rel, host, port
     return path_or_url, None, None
+
+
+def _apply_request_rules(host: str, raw: bytes) -> bytes:
+    """Run Match & Replace request rules for in-scope hosts, keeping
+    Content-Length honest if a body rule shifted the body length."""
+    if not SCOPE.in_scope(host):
+        return raw
+    modified = RULES.apply_request(raw)
+    if modified == raw:
+        return raw
+    sp = modified.find(b"\r\n\r\n")
+    if sp != -1 and modified[sp + 4:]:
+        modified = recompute_content_length(modified)
+    return modified
 
 
 def _sanitize_headers_for_forward(headers: dict[str, str]) -> dict[str, str]:
@@ -155,6 +171,7 @@ class ProxyHandler:
         forwarded_headers.setdefault("Host", host if port == 80 else f"{host}:{port}")
         ensure_content_length(forwarded_headers, body)
         upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
+        upstream_request = _apply_request_rules(host, upstream_request)
 
         tx = STORE.add(
             method=method,
@@ -341,6 +358,7 @@ class ProxyHandler:
         forwarded_headers.setdefault("Host", host if port == 443 else f"{host}:{port}")
         ensure_content_length(forwarded_headers, body)
         upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
+        upstream_request = _apply_request_rules(host, upstream_request)
 
         tx = STORE.add(
             method=method,

@@ -131,3 +131,26 @@ def test_repeater_session_history_and_diff(app):
         assert b"-line2" in s._res_viewer._raw_bytes
     finally:
         s.deleteLater()
+
+
+def test_render_mode_only_for_html_readonly(app):
+    from miniburp.qt.widgets.http_viewer import HttpEditor, HttpViewer
+
+    v = HttpViewer("Response", editable=False)
+    v.set_bytes(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")
+    assert v._render_btn.isEnabled() is False  # not HTML
+
+    v.set_bytes(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+        b"<html><body>root:x:0:0</body></html>"
+    )
+    assert v._render_btn.isEnabled() is True
+    v._render_btn.setChecked(True)
+    assert v._mode == "render"
+    # Hex and Render are mutually exclusive.
+    v._hex_btn.setChecked(True)
+    assert v._mode == "hex" and v._render_btn.isChecked() is False
+
+    # Editable editors don't get a render affordance at all.
+    e = HttpEditor("Request")
+    assert e._render_btn is None and e._render_view is None

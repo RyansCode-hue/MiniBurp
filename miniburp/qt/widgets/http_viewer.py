@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -104,7 +105,7 @@ class HttpViewer(QWidget):
 
         self._raw_bytes: bytes = b""
         self._editable = editable
-        self._mode = "text"  # "text" | "hex"
+        self._mode = "text"  # "text" | "hex" | "render"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -122,9 +123,20 @@ class HttpViewer(QWidget):
         # the budget. Letting QSS padding determine the size keeps it honest
         # across themes / fonts / DPI.
         self._hex_btn.setMinimumWidth(56)
-        self._hex_btn.toggled.connect(self._set_hex_mode)
+        self._hex_btn.toggled.connect(self._on_hex_toggled)
 
         header.addWidget(self._title_label, 1)
+        # Render is a read-only-only affordance (it shows the HTML body as a
+        # page). It's enabled only when the body looks like HTML.
+        self._render_btn: Optional[QPushButton] = None
+        if not editable:
+            self._render_btn = QPushButton("Render", self)
+            self._render_btn.setCheckable(True)
+            self._render_btn.setMinimumWidth(64)
+            self._render_btn.setEnabled(False)
+            self._render_btn.setToolTip("Render the HTML body as a page (no network)")
+            self._render_btn.toggled.connect(self._on_render_toggled)
+            header.addWidget(self._render_btn)
         header.addWidget(self._hex_btn)
 
         # --- editor ---
@@ -133,12 +145,24 @@ class HttpViewer(QWidget):
 
         self.highlighter = HttpHighlighter(self.edit.document())
 
+        # --- render view (read-only viewers only) ---
+        # QTextBrowser does not fetch remote resources on its own, so rendering
+        # a captured page can't phone home past the proxy.
+        self._render_view: Optional[QTextBrowser] = None
+        if not editable:
+            self._render_view = QTextBrowser(self)
+            self._render_view.setOpenExternalLinks(False)
+            self._render_view.setOpenLinks(False)
+            self._render_view.hide()
+
         # --- find bar (hidden until Cmd-F) ---
         self.find_bar = FindBar(self)
         self.find_bar.attach(self.edit)
 
         root.addLayout(header)
         root.addWidget(self.edit, 1)
+        if self._render_view is not None:
+            root.addWidget(self._render_view, 1)
         root.addWidget(self.find_bar)
 
     # ---- public API ----------------------------------------------------
@@ -149,6 +173,8 @@ class HttpViewer(QWidget):
         self._raw_bytes = bytes(raw or b"")
         if title is not None:
             self.set_title(title)
+        if self._render_btn is not None:
+            self._render_btn.setEnabled(self._looks_like_html())
         self._render()
 
     def set_text(self, text: str, title: Optional[str] = None) -> None:
@@ -161,7 +187,7 @@ class HttpViewer(QWidget):
         In hex mode, returns the original bytes it was loaded with, since
         the hex representation is display-only.
         """
-        if self._mode == "hex":
+        if self._mode in ("hex", "render"):
             return self._raw_bytes
         # encode_http_text normalizes newlines to CRLF and falls back to UTF-8
         # when the text isn't Latin-1-representable, so non-ASCII payloads
@@ -182,22 +208,53 @@ class HttpViewer(QWidget):
             self.highlighter.refresh_theme()
 
     # ---- internals -----------------------------------------------------
-    def _set_hex_mode(self, hex_on: bool) -> None:
-        # Preserve edits in text mode before switching.
+    def _looks_like_html(self) -> bool:
+        sp = self._raw_bytes.find(b"\r\n\r\n")
+        head = self._raw_bytes[:sp] if sp != -1 else b""
+        if b"text/html" in head.lower():
+            return True
+        low = self._raw_bytes[:2000].lower()
+        return b"<html" in low or b"<!doctype html" in low
+
+    def _on_hex_toggled(self, on: bool) -> None:
+        if on and self._render_btn is not None and self._render_btn.isChecked():
+            self._render_btn.blockSignals(True)
+            self._render_btn.setChecked(False)
+            self._render_btn.blockSignals(False)
+        self._set_mode("hex" if on else "text")
+
+    def _on_render_toggled(self, on: bool) -> None:
+        if on and self._hex_btn.isChecked():
+            self._hex_btn.blockSignals(True)
+            self._hex_btn.setChecked(False)
+            self._hex_btn.blockSignals(False)
+        self._set_mode("render" if on else "text")
+
+    def _set_mode(self, mode: str) -> None:
+        # Preserve edits in text mode before switching away.
         if self._mode == "text" and self._editable:
             self._raw_bytes = self.bytes_value()
-        self._mode = "hex" if hex_on else "text"
-        # Hex is always read-only.
-        self.edit.setReadOnly(True if hex_on else (not self._editable))
-        self.highlighter.setDocument(None if hex_on else self.edit.document())
+        self._mode = mode
+        # Only text mode is ever editable; hex/render are display-only.
+        self.edit.setReadOnly(True if mode != "text" else (not self._editable))
+        self.highlighter.setDocument(self.edit.document() if mode == "text" else None)
+        if self._render_view is not None:
+            self._render_view.setVisible(mode == "render")
+        self.edit.setVisible(mode != "render")
         self._render()
 
     def _render(self) -> None:
+        if self._mode == "render":
+            if self._render_view is not None:
+                sp = self._raw_bytes.find(b"\r\n\r\n")
+                body = self._raw_bytes[sp + 4:] if sp != -1 else self._raw_bytes
+                self._render_view.setHtml(body.decode("utf-8", errors="replace"))
+            return
         if self._mode == "hex":
             self.edit.setPlainText(_hex_dump(self._raw_bytes))
         else:
             self.edit.setPlainText(_decode(self._raw_bytes))
-        # Re-enable the highlighter when leaving hex.
+        # Re-enable the highlighter when leaving hex/render.
         if self._mode == "text" and self.highlighter.document() is None:
             self.highlighter.setDocument(self.edit.document())
         # Move cursor to top so the viewer starts at the start line.

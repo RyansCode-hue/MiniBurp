@@ -28,6 +28,7 @@ from ...intercept import INTERCEPT
 from ...sender import recompute_content_length
 from ...storage import STORE
 from ..signals import StoreBridge
+from ..widgets.hint_strip import HintStrip
 from ..widgets.http_viewer import HttpEditor
 
 
@@ -136,6 +137,12 @@ class InterceptTab(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
+
+        root.addWidget(HintStrip(
+            "Only <b>in-scope</b> requests are held — set a pattern in "
+            "<b>Scope</b> and turn Intercept <b>ON</b>. Edit the request, then "
+            "Forward (⌘↵) or Drop (⌘⌫). 'Send to Repeater' keeps your edits."
+        ))
 
         # --- toolbar ---
         toolbar = QHBoxLayout()

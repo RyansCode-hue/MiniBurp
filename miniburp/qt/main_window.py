@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from .. import browser as browser_module
 from .. import ca as ca_module
 from ..intercept import INTERCEPT
+from ..scope import SCOPE
 from ..storage import STORE
 from .signals import StoreBridge
 from .tabs.decoder_tab import DecoderTab
@@ -885,7 +886,18 @@ class MainWindow(QMainWindow):
             self._intercept_action.blockSignals(False)
             self._intercept_action.setText(f"Intercept: {'ON' if on else 'OFF'}")
 
-    def _on_added(self, _summary: dict) -> None:
+    def _on_added(self, summary: dict) -> None:
+        # Just-in-time nudge: Intercept is on but this request wasn't held
+        # because its host is out of scope — the #1 "why didn't it stop?"
+        # confusion. Only fires when a non-empty scope actually excludes it.
+        if INTERCEPT.is_enabled() and SCOPE.patterns():
+            host = summary.get("host") or ""
+            if host and not SCOPE.in_scope(host):
+                self._sb_label.setText(
+                    f"Captured {host} but didn't hold it — not in scope. "
+                    f"Add it in the Scope tab to intercept."
+                )
+                return
         self._sb_label.setText(f"{len(STORE.all())} request(s) captured")
 
     # ---- shutdown ------------------------------------------------------

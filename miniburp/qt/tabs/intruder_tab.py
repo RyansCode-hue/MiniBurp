@@ -38,6 +38,7 @@ from ...http_io import encode_http_text
 from ...sender import recompute_content_length, send_raw
 from ...storage import STORE
 from ..widgets.combobox import MiniBurpComboBox
+from ..widgets.hint_strip import HintStrip
 from ..widgets.http_viewer import HttpEditor
 
 
@@ -714,6 +715,11 @@ class IntruderTab(QWidget):
         self._tabs.tabBar().setAttribute(Qt.WA_StyledBackground, True)
         self._tabs.tabCloseRequested.connect(self._close)
 
+        root.addWidget(HintStrip(
+            "Wrap payload positions in <b>§…§</b> (⌘I), pick an attack mode, "
+            "use <b>Load list…</b> for a built-in payload set, then "
+            "<b>Start</b> (⌘↵). Click a result column header to sort."
+        ))
         root.addLayout(top)
         root.addWidget(self._tabs, 1)
 

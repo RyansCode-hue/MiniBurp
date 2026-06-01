@@ -43,6 +43,7 @@ from ...scope import SCOPE
 from ...storage import STORE
 from ..signals import StoreBridge
 from ..widgets.combobox import MiniBurpComboBox
+from ..widgets.hint_strip import HintStrip
 from ..widgets.http_viewer import HttpViewer
 
 
@@ -261,6 +262,12 @@ class ProxyTab(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
+
+        root.addWidget(HintStrip(
+            "Right-click a row for <b>Send to Repeater/Intruder</b> and "
+            "<b>Copy as curl</b>; double-click sends to Repeater. Input that "
+            "echoes back is highlighted in the response."
+        ))
 
         # ---- filter bar ----
         filter_row = QHBoxLayout()

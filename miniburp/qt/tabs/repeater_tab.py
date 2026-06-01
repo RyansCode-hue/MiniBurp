@@ -30,6 +30,7 @@ from ... import reflect
 from ...sender import recompute_content_length, send_raw, send_with_redirects
 from ...storage import STORE
 from ..widgets.combobox import MiniBurpComboBox
+from ..widgets.hint_strip import HintStrip
 from ..widgets.http_viewer import HttpEditor, HttpViewer
 
 
@@ -354,6 +355,11 @@ class RepeaterTab(QWidget):
         top.addWidget(add_btn)
         top.addStretch(1)
 
+        root.addWidget(HintStrip(
+            "<b>⌘↵</b> sends. Step through past sends with <b>◀ ▶</b> and tick "
+            "<b>Diff</b> to compare response bodies. Right-click a selection to "
+            "encode it or insert a payload."
+        ))
         root.addLayout(top)
         root.addWidget(self._tabs, 1)
 

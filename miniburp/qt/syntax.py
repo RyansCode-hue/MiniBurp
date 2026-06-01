@@ -46,6 +46,7 @@ _DARK_PALETTE = {
     "constant":     "#ff7d3d",
     "tag":          "#7aa2ff",
     "comment":      "#8b8b93",
+    "reflect_bg":   "#5a4410",  # warm amber wash behind reflected input
 }
 _LIGHT_PALETTE = {
     "method":       "#1c9c4d",  # forest green
@@ -59,6 +60,7 @@ _LIGHT_PALETTE = {
     "constant":     "#cd4d15",
     "tag":          "#2858a8",
     "comment":      "#6a6a72",
+    "reflect_bg":   "#fff0a8",  # pale amber wash, legible on the off-white bg
 }
 
 
@@ -79,6 +81,9 @@ def _current_theme() -> str:
 class HttpHighlighter(QSyntaxHighlighter):
     def __init__(self, document) -> None:
         super().__init__(document)
+        # Reflected-input needles (set by the response viewer). Highlighted with
+        # a background wash on top of the normal syntax coloring.
+        self._needles: list[str] = []
         self._apply_palette(_current_theme())
 
         self._request_line = QRegularExpression(
@@ -109,13 +114,37 @@ class HttpHighlighter(QSyntaxHighlighter):
         self.fmt_constant = _fmt(pal["constant"], bold=True)
         self.fmt_tag = _fmt(pal["tag"])
         self.fmt_comment = _fmt(pal["comment"], italic=True)
+        self.fmt_reflect = QTextCharFormat()
+        self.fmt_reflect.setBackground(QColor(pal["reflect_bg"]))
 
     def refresh_theme(self) -> None:
         """Re-pick the palette from the current app state and repaint."""
         self._apply_palette(_current_theme())
         self.rehighlight()
 
+    def set_needles(self, needles: list[str]) -> None:
+        """Set the reflected-input strings to wash-highlight, and repaint."""
+        self._needles = list(needles or [])
+        if self.document() is not None:
+            self.rehighlight()
+
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._highlight_syntax(text)
+        self._highlight_needles(text)
+
+    def _highlight_needles(self, text: str) -> None:
+        if not self._needles or not text:
+            return
+        for needle in self._needles:
+            start = 0
+            while True:
+                idx = text.find(needle, start)
+                if idx == -1:
+                    break
+                self.setFormat(idx, len(needle), self.fmt_reflect)
+                start = idx + len(needle)
+
+    def _highlight_syntax(self, text: str) -> None:
         if not text:
             return
 

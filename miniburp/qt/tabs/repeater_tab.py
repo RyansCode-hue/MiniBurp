@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
+from ... import reflect
 from ...sender import recompute_content_length, send_raw, send_with_redirects
 from ...storage import STORE
 from ..widgets.combobox import MiniBurpComboBox
@@ -282,6 +283,7 @@ class RepeaterSession(QWidget):
             )
             diff_text = "\n".join(diff) or "(no differences in the decoded body)"
             self._status_label.setText(status_text + " · diff vs previous")
+            self._res_viewer.set_reflection_needles([])
             self._res_viewer.set_bytes(
                 diff_text.encode("utf-8", errors="replace"),
                 title="Diff vs previous response",
@@ -289,7 +291,15 @@ class RepeaterSession(QWidget):
             return
 
         self._status_label.setText(status_text)
+        # Highlight where the request that produced this response is reflected.
+        req = self._history[self._hist_index].get("request") or b""
+        needles = reflect.request_tokens(req)
+        decoded, _ = bodydecode.decode_body(result.get("body", b""), result.get("headers", {}))
+        hits = reflect.reflected(needles, decoded.decode("iso-8859-1", errors="replace"))
+        if hits:
+            title += f"  ·  {len(hits)} reflected"
         self._res_viewer.set_bytes(display, title=title)
+        self._res_viewer.set_reflection_needles(hits)
 
     def _step_history(self, delta: int) -> None:
         new = self._hist_index + delta

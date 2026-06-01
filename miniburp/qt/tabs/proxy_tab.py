@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
+from ... import reflect
 from ...curl import to_curl
 from ...scope import SCOPE
 from ...storage import STORE
@@ -470,7 +471,13 @@ class ProxyTab(QWidget):
             title += f"  [body decode: {note}]"
         elif tx.resp_headers.get("Content-Encoding"):
             title += "  [decoded]"
+        # Highlight where this request's input echoes in the response body.
+        needles = reflect.request_tokens(tx.raw_request or b"")
+        hits = reflect.reflected(needles, decoded_body.decode("iso-8859-1", errors="replace"))
+        if hits:
+            title += f"  ·  {len(hits)} reflected"
         self._res_viewer.set_bytes(display, title=title)
+        self._res_viewer.set_reflection_needles(hits)
 
     def _emit_selected(self, sig: Signal) -> None:
         idx = self._table.currentIndex()

@@ -207,6 +207,11 @@ class HttpViewer(QWidget):
         if self.highlighter is not None and self._mode == "text":
             self.highlighter.refresh_theme()
 
+    def set_reflection_needles(self, needles: list[str]) -> None:
+        """Wash-highlight occurrences of request input in this response view."""
+        if self.highlighter is not None:
+            self.highlighter.set_needles(needles)
+
     # ---- internals -----------------------------------------------------
     def _looks_like_html(self) -> bool:
         sp = self._raw_bytes.find(b"\r\n\r\n")

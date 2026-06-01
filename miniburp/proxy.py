@@ -30,6 +30,7 @@ from .http_io import (
     parse_status_code,
     read_request,
     read_response,
+    validate_request_bytes,
 )
 from .intercept import INTERCEPT, InterceptResult
 from .noise import is_noise
@@ -175,6 +176,12 @@ class ProxyHandler:
                 self._send_error(503, "Request dropped by MiniBurp intercept")
                 return
             if new_raw is not None and new_raw != upstream_request:
+                err = validate_request_bytes(new_raw)
+                if err is not None:
+                    STORE.update(tx.id, error=f"malformed edit: {err}",
+                                 finished_at=__import__("time").time())
+                    self._send_error(400, f"Edited request is malformed: {err}")
+                    return
                 upstream_request = new_raw
                 STORE.update(tx.id, raw_request=new_raw)
 
@@ -360,6 +367,19 @@ class ProxyHandler:
                 )
                 return
             if new_raw is not None and new_raw != upstream_request:
+                err = validate_request_bytes(new_raw)
+                if err is not None:
+                    STORE.update(tx.id, error=f"malformed edit: {err}",
+                                 finished_at=__import__("time").time())
+                    body = f"Edited request is malformed: {err}".encode("utf-8")
+                    tls_client.sendall(
+                        build_request_bytes(
+                            "HTTP/1.1 400 Bad Request",
+                            {"Content-Length": str(len(body)), "Connection": "close"},
+                            body,
+                        )
+                    )
+                    return
                 upstream_request = new_raw
                 STORE.update(tx.id, raw_request=new_raw)
 

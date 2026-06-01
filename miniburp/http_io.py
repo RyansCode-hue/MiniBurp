@@ -193,6 +193,42 @@ def ensure_content_length(headers: dict[str, str], body: bytes) -> dict[str, str
     return headers
 
 
+def validate_request_bytes(raw: bytes) -> Optional[str]:
+    """Return a human-readable error if ``raw`` isn't a forwardable request.
+
+    Guards the proxy against a hand-edited Intercept request whose start line
+    lost a token (deleted HTTP version, double-spaced path) or whose Host header
+    was removed — both would otherwise raise deep inside the worker
+    (``start_line.split(" ", 2)``) and drop the connection with no feedback.
+    Returns ``None`` when the request looks well-formed.
+    """
+    split = raw.find(b"\r\n\r\n")
+    head = raw[:split] if split != -1 else raw
+    if not head.strip():
+        return "empty request"
+    try:
+        text = head.decode("iso-8859-1")
+    except Exception:
+        return "request headers are not decodable"
+    lines = text.split("\r\n")
+    parts = lines[0].split(" ")
+    if len(parts) != 3:
+        return f"request line must be 'METHOD TARGET HTTP/x.y' (got {lines[0]!r})"
+    method, target, version = parts
+    if not method or not target:
+        return "request line is missing the method or target"
+    if not version.upper().startswith("HTTP/"):
+        return f"request line version must look like HTTP/1.1 (got {version!r})"
+    has_host = any(
+        line.split(":", 1)[0].strip().lower() == "host"
+        for line in lines[1:]
+        if ":" in line
+    )
+    if not has_host:
+        return "request is missing a Host header"
+    return None
+
+
 def parse_status_code(status_line: str) -> Optional[int]:
     """Pull the numeric status out of a response start line, tolerantly.
 

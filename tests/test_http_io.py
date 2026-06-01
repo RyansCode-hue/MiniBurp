@@ -9,7 +9,11 @@ Tests for the request-forwarding robustness helpers in http_io:
 """
 from __future__ import annotations
 
-from miniburp.http_io import ensure_content_length, parse_status_code
+from miniburp.http_io import (
+    ensure_content_length,
+    parse_status_code,
+    validate_request_bytes,
+)
 
 
 # ---- ensure_content_length -------------------------------------------------
@@ -60,3 +64,39 @@ def test_status_line_non_numeric_returns_none():
 
 def test_empty_status_line_returns_none():
     assert parse_status_code("") is None
+
+
+# ---- validate_request_bytes ------------------------------------------------
+
+def test_valid_request_passes():
+    raw = b"GET /image?filename=../../../etc/passwd HTTP/1.1\r\nHost: lab.net\r\n\r\n"
+    assert validate_request_bytes(raw) is None
+
+
+def test_valid_post_with_body_passes():
+    raw = b"POST /login HTTP/1.1\r\nHost: lab.net\r\nContent-Length: 3\r\n\r\nabc"
+    assert validate_request_bytes(raw) is None
+
+
+def test_missing_host_header_flagged():
+    raw = b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n"
+    err = validate_request_bytes(raw)
+    assert err is not None and "Host" in err
+
+
+def test_missing_http_version_flagged():
+    # User deleted the version token — only two tokens remain.
+    raw = b"GET /etc/passwd\r\nHost: lab.net\r\n\r\n"
+    err = validate_request_bytes(raw)
+    assert err is not None and "request line" in err
+
+
+def test_double_spaced_path_flagged():
+    # An unencoded space in the target yields four tokens.
+    raw = b"GET /et c/passwd HTTP/1.1\r\nHost: lab.net\r\n\r\n"
+    assert validate_request_bytes(raw) is not None
+
+
+def test_empty_request_flagged():
+    assert validate_request_bytes(b"") is not None
+    assert validate_request_bytes(b"\r\n\r\n") is not None

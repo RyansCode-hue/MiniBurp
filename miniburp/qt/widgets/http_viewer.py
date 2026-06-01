@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...http_io import encode_http_text
 from ..syntax import HttpHighlighter
 from .find_bar import FindBar
 
@@ -130,10 +131,10 @@ class HttpViewer(QWidget):
         """
         if self._mode == "hex":
             return self._raw_bytes
-        text = self.edit.toPlainText()
-        # normalize line endings to CRLF for HTTP
-        text = text.replace("\r\n", "\n").replace("\n", "\r\n")
-        return text.encode("iso-8859-1", errors="replace")
+        # encode_http_text normalizes newlines to CRLF and falls back to UTF-8
+        # when the text isn't Latin-1-representable, so non-ASCII payloads
+        # aren't silently turned into '?'.
+        return encode_http_text(self.edit.toPlainText())
 
     def text_value(self) -> str:
         return self.edit.toPlainText()

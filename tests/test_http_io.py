@@ -10,6 +10,7 @@ Tests for the request-forwarding robustness helpers in http_io:
 from __future__ import annotations
 
 from miniburp.http_io import (
+    encode_http_text,
     ensure_content_length,
     parse_status_code,
     validate_request_bytes,
@@ -100,3 +101,23 @@ def test_double_spaced_path_flagged():
 def test_empty_request_flagged():
     assert validate_request_bytes(b"") is not None
     assert validate_request_bytes(b"\r\n\r\n") is not None
+
+
+# ---- encode_http_text ------------------------------------------------------
+
+def test_ascii_round_trips_as_latin1():
+    out = encode_http_text("GET /x HTTP/1.1\nHost: a\n\nbody")
+    # newlines normalized to CRLF
+    assert out == b"GET /x HTTP/1.1\r\nHost: a\r\n\r\nbody"
+
+
+def test_existing_crlf_not_doubled():
+    out = encode_http_text("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+    assert out == b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+
+
+def test_non_latin1_falls_back_to_utf8_not_question_marks():
+    # A multibyte body char would become '?' under errors='replace'.
+    out = encode_http_text("POST / HTTP/1.1\r\n\r\nname=café—naïve")
+    assert "café—naïve".encode("utf-8") in out
+    assert b"?" not in out.split(b"\r\n\r\n", 1)[1]

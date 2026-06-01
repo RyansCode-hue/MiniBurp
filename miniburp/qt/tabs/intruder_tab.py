@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import bodydecode
+from ...http_io import encode_http_text
 from ...sender import recompute_content_length, send_raw
 from ...storage import STORE
 from ..widgets.combobox import MiniBurpComboBox
@@ -167,7 +168,10 @@ class _AttackWorker(QThread):
         """Build the raw request for one attempt, send it, and return the row."""
         if self._abort:
             return None
-        raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("iso-8859-1")
+        # encode_http_text normalizes CRLF and falls back to UTF-8 for non-Latin-1
+        # payloads — the old bare .encode("iso-8859-1") raised and killed the
+        # worker thread the moment a payload contained a multibyte character.
+        raw = encode_http_text(text)
         # Body length changes per attempt — recompute Content-Length so we
         # don't ship truncated requests for every payload but the first.
         raw = recompute_content_length(raw)
@@ -455,7 +459,7 @@ class IntruderSession(QWidget):
         cleaned = text.replace("§", "")
         # set_bytes routes through the editor's _render → setPlainText, which
         # fires textChanged so _rebuild_payload_panels picks the change up.
-        self._template.set_bytes(cleaned.encode("iso-8859-1", errors="replace"))
+        self._template.set_bytes(encode_http_text(cleaned))
 
     def _update_match_status(self) -> None:
         text = self._match_input.text()

@@ -172,6 +172,24 @@ def build_response_bytes(start_line: str, headers: dict[str, str], body: bytes) 
     return build_request_bytes(start_line, headers, body)  # same shape
 
 
+def encode_http_text(text: str) -> bytes:
+    """Encode editor text to HTTP wire bytes, normalizing newlines to CRLF.
+
+    HTTP/1.1 treats the request line and headers as iso-8859-1, so we prefer
+    it. But a body can legitimately carry UTF-8 — unicode-normalization or
+    overlong path-traversal payloads, multibyte test strings, smart quotes
+    pasted from a writeup. Rather than silently turning every non-Latin-1
+    character into ``?`` (the old ``errors="replace"``), fall back to UTF-8
+    for the whole message when strict Latin-1 fails, so the user's bytes reach
+    the server intact instead of being corrupted invisibly.
+    """
+    text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    try:
+        return text.encode("iso-8859-1")
+    except UnicodeEncodeError:
+        return text.encode("utf-8")
+
+
 def ensure_content_length(headers: dict[str, str], body: bytes) -> dict[str, str]:
     """Set ``Content-Length`` to ``len(body)`` when a body is present and no
     Content-Length header survived.

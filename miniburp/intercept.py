@@ -1,18 +1,21 @@
 """
 Intercept coordinator.
 
-When intercept is enabled, the proxy calls `INTERCEPT.hold(tx_id, raw)`
-for each in-scope request. The calling thread blocks until the web UI
-tells the request to be forwarded (optionally with modified bytes) or
-dropped. When intercept is disabled, `hold` returns immediately with
-("forward", raw).
+When request interception is enabled, the proxy calls `INTERCEPT.hold(tx_id, raw)`
+for each in-scope request and the calling thread blocks until the UI forwards
+(optionally with modified bytes) or drops it. When response interception is
+enabled, the proxy calls `INTERCEPT.hold_response(tx_id, raw)` after it reads the
+upstream response, blocking the same way before the response reaches the browser
+— that's what lets you edit a `Set-Cookie` (or any header/body) on the way back.
+Disabled holds return immediately with ("forward", raw).
 
-Held transactions publish to the same subscriber channel as the regular
-store so the UI can live-stream their arrivals too.
+Held items publish to the same subscriber channel as the store so the UI can
+live-stream their arrivals:
+  requests   -> {"kind": "intercept"} / {"kind": "intercept-clear"}
+  responses  -> {"kind": "intercept-response"} / {"kind": "intercept-response-clear"}
 """
 from __future__ import annotations
 
-import queue
 import threading
 from typing import Optional
 
@@ -27,36 +30,23 @@ class InterceptResult:
 class Intercept:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.enabled: bool = False
+        self.enabled: bool = False           # request interception
+        self.responses_enabled: bool = False  # response interception
         # tx_id -> [Event, original_bytes, result_tuple]
         self._held: dict[int, list] = {}
+        self._held_resp: dict[int, list] = {}
 
-    # ---- UI-facing API -------------------------------------------------
-    def set_enabled(self, value: bool) -> None:
+    # ---- shared helpers ------------------------------------------------
+    def _release_all(self, store: dict[int, list]) -> None:
+        """Forward-release everything still held in `store` (lock held)."""
+        for slot in list(store.values()):
+            if slot[2] is None:
+                slot[2] = (InterceptResult.FORWARD, slot[1])
+                slot[0].set()
+
+    def _forward(self, store: dict[int, list], tx_id: int, new_bytes: Optional[bytes]) -> bool:
         with self._lock:
-            self.enabled = bool(value)
-            if not self.enabled:
-                # release everything still held as "forward unchanged"
-                for slot in list(self._held.values()):
-                    if slot[2] is None:
-                        slot[2] = (InterceptResult.FORWARD, slot[1])
-                        slot[0].set()
-
-    def is_enabled(self) -> bool:
-        return self.enabled
-
-    def held_ids(self) -> list[int]:
-        with self._lock:
-            return sorted(tid for tid, slot in self._held.items() if slot[2] is None)
-
-    def held_bytes(self, tx_id: int) -> Optional[bytes]:
-        with self._lock:
-            slot = self._held.get(tx_id)
-            return slot[1] if slot else None
-
-    def forward(self, tx_id: int, new_bytes: Optional[bytes] = None) -> bool:
-        with self._lock:
-            slot = self._held.get(tx_id)
+            slot = store.get(tx_id)
             if not slot or slot[2] is not None:
                 return False
             out = new_bytes if new_bytes is not None else slot[1]
@@ -64,46 +54,118 @@ class Intercept:
             slot[0].set()
             return True
 
-    def drop(self, tx_id: int) -> bool:
+    def _drop(self, store: dict[int, list], tx_id: int) -> bool:
         with self._lock:
-            slot = self._held.get(tx_id)
+            slot = store.get(tx_id)
             if not slot or slot[2] is not None:
                 return False
             slot[2] = (InterceptResult.DROP, None)
             slot[0].set()
             return True
 
-    def forward_all(self) -> int:
+    def _forward_all(self, store: dict[int, list]) -> int:
         with self._lock:
             n = 0
-            for slot in self._held.values():
+            for slot in store.values():
                 if slot[2] is None:
                     slot[2] = (InterceptResult.FORWARD, slot[1])
                     slot[0].set()
                     n += 1
             return n
 
-    # ---- proxy-facing API ----------------------------------------------
-    def hold(self, tx_id: int, raw: bytes) -> tuple[str, Optional[bytes]]:
-        """Block until the UI decides; return (action, bytes_or_None)."""
-        if not self.enabled:
+    def _hold(
+        self,
+        store: dict[int, list],
+        tx_id: int,
+        raw: bytes,
+        enabled: bool,
+        held_kind: str,
+        clear_kind: str,
+    ) -> tuple[str, Optional[bytes]]:
+        if not enabled:
             return (InterceptResult.FORWARD, raw)
-
         ev = threading.Event()
         with self._lock:
-            self._held[tx_id] = [ev, raw, None]
-        # Tell subscribers a request is held so the UI can refresh.
-        STORE._publish({"kind": "intercept", "tx_id": tx_id})  # type: ignore[attr-defined]
-
+            store[tx_id] = [ev, raw, None]
+        STORE._publish({"kind": held_kind, "tx_id": tx_id})  # type: ignore[attr-defined]
         ev.wait()
-
         with self._lock:
-            slot = self._held.pop(tx_id, None)
+            slot = store.pop(tx_id, None)
         if slot is None:
             return (InterceptResult.FORWARD, raw)
         action, body = slot[2]
-        STORE._publish({"kind": "intercept-clear", "tx_id": tx_id})  # type: ignore[attr-defined]
+        STORE._publish({"kind": clear_kind, "tx_id": tx_id})  # type: ignore[attr-defined]
         return action, body
+
+    # ---- requests: UI-facing -------------------------------------------
+    def set_enabled(self, value: bool) -> None:
+        with self._lock:
+            self.enabled = bool(value)
+            if not self.enabled:
+                self._release_all(self._held)
+
+    def is_enabled(self) -> bool:
+        return self.enabled
+
+    def held_ids(self) -> list[int]:
+        with self._lock:
+            return sorted(t for t, s in self._held.items() if s[2] is None)
+
+    def held_bytes(self, tx_id: int) -> Optional[bytes]:
+        with self._lock:
+            slot = self._held.get(tx_id)
+            return slot[1] if slot else None
+
+    def forward(self, tx_id: int, new_bytes: Optional[bytes] = None) -> bool:
+        return self._forward(self._held, tx_id, new_bytes)
+
+    def drop(self, tx_id: int) -> bool:
+        return self._drop(self._held, tx_id)
+
+    def forward_all(self) -> int:
+        return self._forward_all(self._held)
+
+    # ---- responses: UI-facing ------------------------------------------
+    def set_responses_enabled(self, value: bool) -> None:
+        with self._lock:
+            self.responses_enabled = bool(value)
+            if not self.responses_enabled:
+                self._release_all(self._held_resp)
+
+    def is_responses_enabled(self) -> bool:
+        return self.responses_enabled
+
+    def held_response_ids(self) -> list[int]:
+        with self._lock:
+            return sorted(t for t, s in self._held_resp.items() if s[2] is None)
+
+    def held_response_bytes(self, tx_id: int) -> Optional[bytes]:
+        with self._lock:
+            slot = self._held_resp.get(tx_id)
+            return slot[1] if slot else None
+
+    def forward_response(self, tx_id: int, new_bytes: Optional[bytes] = None) -> bool:
+        return self._forward(self._held_resp, tx_id, new_bytes)
+
+    def drop_response(self, tx_id: int) -> bool:
+        return self._drop(self._held_resp, tx_id)
+
+    def forward_all_responses(self) -> int:
+        return self._forward_all(self._held_resp)
+
+    # ---- proxy-facing --------------------------------------------------
+    def hold(self, tx_id: int, raw: bytes) -> tuple[str, Optional[bytes]]:
+        """Block until the UI decides on a request; return (action, bytes_or_None)."""
+        return self._hold(
+            self._held, tx_id, raw, self.enabled, "intercept", "intercept-clear",
+        )
+
+    def hold_response(self, tx_id: int, raw: bytes) -> tuple[str, Optional[bytes]]:
+        """Block until the UI decides on a response; return (action, bytes_or_None)."""
+        return self._hold(
+            self._held_resp, tx_id, raw, self.responses_enabled,
+            "intercept-response", "intercept-response-clear",
+        )
 
 
 INTERCEPT = Intercept()

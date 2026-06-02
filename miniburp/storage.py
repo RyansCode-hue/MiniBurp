@@ -66,7 +66,7 @@ class Transaction:
 
     @property
     def duration_ms(self) -> Optional[int]:
-        if self.finished_at is None:
+        if self.finished_at is None or self.started_at is None:
             return None
         return int((self.finished_at - self.started_at) * 1000)
 
@@ -151,6 +151,24 @@ class Store:
         with self._lock:
             self._items.clear()
             self._publish({"kind": "clear"})
+
+    def load(self, items: list[dict]) -> None:
+        """Replace history with a saved session.
+
+        Each item is a kwargs dict (as produced by ``session_io``). IDs are
+        reassigned sequentially. Subscribers see a ``clear`` followed by one
+        ``add`` per restored transaction, so the history table rebuilds itself
+        through the existing pub/sub path.
+        """
+        with self._lock:
+            self._items.clear()
+            self._next_id = 1
+            self._publish({"kind": "clear"})
+            for it in items:
+                tx = Transaction(id=self._next_id, **it)
+                self._next_id += 1
+                self._items.append(tx)
+                self._publish({"kind": "add", "tx": tx.summary()})
 
 
 # Single global store used by both proxy and web UI.

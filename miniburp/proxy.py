@@ -26,12 +26,18 @@ from . import ca
 from .http_io import (
     HTTPParseError,
     build_request_bytes,
+    ensure_content_length,
+    parse_response_bytes,
+    parse_status_code,
     read_request,
     read_response,
+    validate_request_bytes,
 )
 from .intercept import INTERCEPT, InterceptResult
 from .noise import is_noise
+from .rules import RULES
 from .scope import SCOPE
+from .sender import recompute_content_length
 from .storage import STORE
 
 
@@ -66,6 +72,29 @@ def _absolute_to_relative(path_or_url: str) -> tuple[str, Optional[str], Optiona
             rel += "?" + parts.query
         return rel, host, port
     return path_or_url, None, None
+
+
+def _apply_request_rules(host: str, raw: bytes) -> bytes:
+    """Run Match & Replace request rules for in-scope hosts, keeping
+    Content-Length honest if a body rule shifted the body length."""
+    if not SCOPE.in_scope(host):
+        return raw
+    modified = RULES.apply_request(raw)
+    if modified == raw:
+        return raw
+    # Keep Content-Length honest after a body rule. Recompute when the request
+    # has a body OR already declares a Content-Length — so a rule that *empties*
+    # the body correctly drops Content-Length to 0 instead of leaving a stale
+    # length that hangs the upstream. Bodyless GETs (no CL header) stay untouched.
+    sp = modified.find(b"\r\n\r\n")
+    if sp != -1:
+        head, body = modified[:sp], modified[sp + 4:]
+        has_cl = any(
+            ln.lower().startswith(b"content-length:") for ln in head.split(b"\r\n")
+        )
+        if body or has_cl:
+            modified = recompute_content_length(modified)
+    return modified
 
 
 def _sanitize_headers_for_forward(headers: dict[str, str]) -> dict[str, str]:
@@ -150,7 +179,9 @@ class ProxyHandler:
         forwarded_start = f"{method} {rel} {version}"
         forwarded_headers = _sanitize_headers_for_forward(headers)
         forwarded_headers.setdefault("Host", host if port == 80 else f"{host}:{port}")
+        ensure_content_length(forwarded_headers, body)
         upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
+        upstream_request = _apply_request_rules(host, upstream_request)
 
         tx = STORE.add(
             method=method,
@@ -172,6 +203,12 @@ class ProxyHandler:
                 self._send_error(503, "Request dropped by MiniBurp intercept")
                 return
             if new_raw is not None and new_raw != upstream_request:
+                err = validate_request_bytes(new_raw)
+                if err is not None:
+                    STORE.update(tx.id, error=f"malformed edit: {err}",
+                                 finished_at=__import__("time").time())
+                    self._send_error(400, f"Edited request is malformed: {err}")
+                    return
                 upstream_request = new_raw
                 STORE.update(tx.id, raw_request=new_raw)
 
@@ -185,7 +222,7 @@ class ProxyHandler:
         try:
             upstream.sendall(upstream_request)
             resp_start, resp_headers, resp_body, raw_resp = read_response(upstream)
-            status = int(resp_start.split(" ", 2)[1])
+            status = parse_status_code(resp_start)
             STORE.update(
                 tx.id,
                 status=status,
@@ -194,13 +231,51 @@ class ProxyHandler:
                 raw_response=raw_resp,
                 finished_at=__import__("time").time(),
             )
-            # Forward to client, strip hop-by-hop, force close.
-            client_headers = _sanitize_headers_for_forward(resp_headers)
-            client_headers["Content-Length"] = str(len(resp_body))
-            client_bytes = build_request_bytes(resp_start, client_headers, resp_body)
-            self.client.sendall(client_bytes)
+            self._deliver_response(
+                self.client.sendall, host, tx.id,
+                resp_start, resp_headers, resp_body, raw_resp,
+            )
         finally:
             upstream.close()
+
+    # ---- response delivery + interception ------------------------------
+    def _deliver_response(
+        self,
+        send,
+        host: str,
+        tx_id: int,
+        resp_start: str,
+        resp_headers: dict[str, str],
+        resp_body: bytes,
+        raw_resp: bytes,
+    ) -> None:
+        """Optionally hold the response for editing, then send it to the client.
+
+        ``send`` is the client write callable (``self.client.sendall`` for plain
+        HTTP, the TLS socket's ``sendall`` for HTTPS). When response interception
+        is on for an in-scope host, the worker blocks until the UI forwards
+        (possibly edited) or drops. Whatever we deliver is re-sanitized and gets
+        a correct Content-Length, so a chunked-then-decoded body or a UI edit
+        still reaches the browser well-formed.
+        """
+        if SCOPE.in_scope(host) and INTERCEPT.is_responses_enabled():
+            action, edited = INTERCEPT.hold_response(tx_id, raw_resp)
+            if action == InterceptResult.DROP:
+                STORE.update(tx_id, error="response dropped by intercept")
+                return  # close without delivering anything to the client
+            if edited is not None and edited != raw_resp:
+                resp_start, resp_headers, resp_body = parse_response_bytes(edited)
+                STORE.update(
+                    tx_id,
+                    status=parse_status_code(resp_start),
+                    resp_headers=resp_headers,
+                    resp_body=resp_body,
+                    raw_response=edited,
+                )
+        # Strip hop-by-hop, force close, and make Content-Length truthful.
+        client_headers = _sanitize_headers_for_forward(resp_headers)
+        client_headers["Content-Length"] = str(len(resp_body))
+        send(build_request_bytes(resp_start, client_headers, resp_body))
 
     # ---- noise pass-through --------------------------------------------
     def _transparent_tunnel(self, host: str, port: int) -> None:
@@ -298,8 +373,11 @@ class ProxyHandler:
                 start_line2, headers2, body2, _raw = parsed
                 try:
                     self._forward_https(tls_client, host, port, start_line2, headers2, body2)
-                except HTTPParseError as e:
-                    print(f"[proxy] upstream parse error: {e}")
+                except (HTTPParseError, ValueError, OSError, ssl.SSLError) as e:
+                    # One malformed message (bad status line, dropped upstream,
+                    # half-broken endpoint) ends this connection cleanly instead
+                    # of escaping to handle()'s blanket except as a traceback.
+                    print(f"[proxy] upstream error on {host}: {e}")
                     break
                 # Honor client Connection: close.
                 if headers2.get("Connection", "").lower() == "close":
@@ -326,7 +404,9 @@ class ProxyHandler:
         forwarded_start = f"{method} {rel} {version}"
         forwarded_headers = _sanitize_headers_for_forward(headers)
         forwarded_headers.setdefault("Host", host if port == 443 else f"{host}:{port}")
+        ensure_content_length(forwarded_headers, body)
         upstream_request = build_request_bytes(forwarded_start, forwarded_headers, body)
+        upstream_request = _apply_request_rules(host, upstream_request)
 
         tx = STORE.add(
             method=method,
@@ -353,6 +433,19 @@ class ProxyHandler:
                 )
                 return
             if new_raw is not None and new_raw != upstream_request:
+                err = validate_request_bytes(new_raw)
+                if err is not None:
+                    STORE.update(tx.id, error=f"malformed edit: {err}",
+                                 finished_at=__import__("time").time())
+                    body = f"Edited request is malformed: {err}".encode("utf-8")
+                    tls_client.sendall(
+                        build_request_bytes(
+                            "HTTP/1.1 400 Bad Request",
+                            {"Content-Length": str(len(body)), "Connection": "close"},
+                            body,
+                        )
+                    )
+                    return
                 upstream_request = new_raw
                 STORE.update(tx.id, raw_request=new_raw)
 
@@ -372,7 +465,7 @@ class ProxyHandler:
         try:
             upstream.sendall(upstream_request)
             resp_start, resp_headers, resp_body, raw_resp = read_response(upstream)
-            status = int(resp_start.split(" ", 2)[1])
+            status = parse_status_code(resp_start)
             STORE.update(
                 tx.id,
                 status=status,
@@ -381,9 +474,10 @@ class ProxyHandler:
                 raw_response=raw_resp,
                 finished_at=__import__("time").time(),
             )
-            client_headers = _sanitize_headers_for_forward(resp_headers)
-            client_headers["Content-Length"] = str(len(resp_body))
-            tls_client.sendall(build_request_bytes(resp_start, client_headers, resp_body))
+            self._deliver_response(
+                tls_client.sendall, host, tx.id,
+                resp_start, resp_headers, resp_body, raw_resp,
+            )
         finally:
             upstream.close()
 

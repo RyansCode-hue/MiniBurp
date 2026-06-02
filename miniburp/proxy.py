@@ -27,6 +27,7 @@ from .http_io import (
     HTTPParseError,
     build_request_bytes,
     ensure_content_length,
+    parse_response_bytes,
     parse_status_code,
     read_request,
     read_response,
@@ -230,13 +231,51 @@ class ProxyHandler:
                 raw_response=raw_resp,
                 finished_at=__import__("time").time(),
             )
-            # Forward to client, strip hop-by-hop, force close.
-            client_headers = _sanitize_headers_for_forward(resp_headers)
-            client_headers["Content-Length"] = str(len(resp_body))
-            client_bytes = build_request_bytes(resp_start, client_headers, resp_body)
-            self.client.sendall(client_bytes)
+            self._deliver_response(
+                self.client.sendall, host, tx.id,
+                resp_start, resp_headers, resp_body, raw_resp,
+            )
         finally:
             upstream.close()
+
+    # ---- response delivery + interception ------------------------------
+    def _deliver_response(
+        self,
+        send,
+        host: str,
+        tx_id: int,
+        resp_start: str,
+        resp_headers: dict[str, str],
+        resp_body: bytes,
+        raw_resp: bytes,
+    ) -> None:
+        """Optionally hold the response for editing, then send it to the client.
+
+        ``send`` is the client write callable (``self.client.sendall`` for plain
+        HTTP, the TLS socket's ``sendall`` for HTTPS). When response interception
+        is on for an in-scope host, the worker blocks until the UI forwards
+        (possibly edited) or drops. Whatever we deliver is re-sanitized and gets
+        a correct Content-Length, so a chunked-then-decoded body or a UI edit
+        still reaches the browser well-formed.
+        """
+        if SCOPE.in_scope(host) and INTERCEPT.is_responses_enabled():
+            action, edited = INTERCEPT.hold_response(tx_id, raw_resp)
+            if action == InterceptResult.DROP:
+                STORE.update(tx_id, error="response dropped by intercept")
+                return  # close without delivering anything to the client
+            if edited is not None and edited != raw_resp:
+                resp_start, resp_headers, resp_body = parse_response_bytes(edited)
+                STORE.update(
+                    tx_id,
+                    status=parse_status_code(resp_start),
+                    resp_headers=resp_headers,
+                    resp_body=resp_body,
+                    raw_response=edited,
+                )
+        # Strip hop-by-hop, force close, and make Content-Length truthful.
+        client_headers = _sanitize_headers_for_forward(resp_headers)
+        client_headers["Content-Length"] = str(len(resp_body))
+        send(build_request_bytes(resp_start, client_headers, resp_body))
 
     # ---- noise pass-through --------------------------------------------
     def _transparent_tunnel(self, host: str, port: int) -> None:
@@ -435,9 +474,10 @@ class ProxyHandler:
                 raw_response=raw_resp,
                 finished_at=__import__("time").time(),
             )
-            client_headers = _sanitize_headers_for_forward(resp_headers)
-            client_headers["Content-Length"] = str(len(resp_body))
-            tls_client.sendall(build_request_bytes(resp_start, client_headers, resp_body))
+            self._deliver_response(
+                tls_client.sendall, host, tx.id,
+                resp_start, resp_headers, resp_body, raw_resp,
+            )
         finally:
             upstream.close()
 

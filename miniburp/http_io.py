@@ -258,3 +258,18 @@ def parse_status_code(status_line: str) -> Optional[int]:
         return int(status_line.split(" ", 2)[1])
     except (IndexError, ValueError):
         return None
+
+
+def parse_response_bytes(raw: bytes) -> tuple[str, dict[str, str], bytes]:
+    """Split raw response bytes into (status_line, headers, body).
+
+    Used when a UI-edited response comes back from response interception and we
+    re-sanitize headers / recompute Content-Length before delivering it.
+    """
+    split = raw.find(b"\r\n\r\n")
+    if split == -1:
+        head, body = raw, b""
+    else:
+        head, body = raw[:split], raw[split + 4:]
+    start_line, headers = parse_headers(head)
+    return start_line, headers, body

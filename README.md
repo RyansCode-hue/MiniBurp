@@ -118,7 +118,7 @@ on first run; nothing in this repo carries CA material.
 | Tab | What it does |
 | --- | --- |
 | **Proxy** | Filterable history with full-text search across URL, raw request, raw response, and the decoded response body (so `csrf-token` matches gzipped pages). Optional regex. Click any row to inspect the request / response, syntax-highlighted, with a hex toggle, a **Render** view for HTML bodies, and Cmd-F find. Where your input echoes back in the response is **highlighted** with an *N reflected* badge. **Right-click** a row → *Send to Repeater* / *Send to Intruder*, *Copy URL*, *Copy request*, *Copy as curl*; **double-click** sends to Repeater. |
-| **Intercept** | Pause requests, edit raw bytes (or as a **Params** key/value table), forward or drop. *Auto Content-Length* keeps an edited body's length honest. *Send to Repeater / Intruder* carries your edits across. Forward `⌘↵` / Drop `⌘⌫`. Only **in-scope** requests are held. |
+| **Intercept** | Pause requests, edit raw bytes (or as a **Params** key/value table), forward or drop. Tick **Intercept responses** to also hold responses on the way back and edit them before the browser sees them (e.g. flip a `Set-Cookie`). *Auto Content-Length* keeps an edited request body's length honest. *Send to Repeater / Intruder* carries your edits across. Forward `⌘↵` / Drop `⌘⌫`. Only **in-scope** traffic is held. |
 | **Repeater** | Multi-tab editable request + response. Send with `⌘↵`. Step through every past send (`◀ n/m ▶`) and **Diff** their response bodies. Optional *Update CL* recomputes Content-Length after a body edit. Optional *Follow redirects* with standard HTTP semantics (301/302/303 → GET; 307/308 preserve method + body) and a minimal cookie jar so multi-hop login flows reach the final page; the hop chain is shown in the status bar. |
 | **Intruder** | 4 attack modes — Sniper, Battering-Ram, Pitchfork (lockstep lists), Cluster Bomb (cartesian product). *Load list…* fills a payload panel from the built-in library. Start with `⌘↵`. Streams results into a live, sortable table. |
 | **Decoder** | Base64 / URL / hex / HTML-entity encode + decode. MD5 / SHA-1 / SHA-256 hashes. Chain output back to input. The same ops are available by **right-clicking a selection** in any request editor. |
@@ -199,6 +199,45 @@ python run.py --url LAB_URL           # open Chrome straight to a lab URL
 python run.py --no-browser            # desktop only
 python run.py --web                   # legacy Flask UI at http://127.0.0.1:8888/
 ```
+
+### Double-click launcher that updates with `git pull` (recommended for devs)
+
+`./build.sh` re-freezes the app with PyInstaller every time, and each rebuild
+gets a fresh code-signing identity — so macOS re-prompts for permissions
+(Accessibility, firewall, …) on every build. If you're working from the repo and
+just want a double-click app for daily lab work, install the **launcher** once
+instead of building.
+
+**One-time setup** (from a fresh clone):
+
+```bash
+git clone https://github.com/RyansCode-hue/MiniBurp.git
+cd MiniBurp
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+tools/make_launcher.sh            # creates ~/Applications/MiniBurp.app
+```
+
+Then launch it like any Mac app — Spotlight (⌘-Space → "MiniBurp"), the
+`~/Applications` folder, or `open ~/Applications/MiniBurp.app`. Drag it to the
+Dock once for one-click access.
+
+The launcher is a tiny wrapper `MiniBurp.app` that runs your live source
+(`.venv/bin/python run.py`). It has no frozen bootloader and no argv-emulation,
+so it never asks for Accessibility, and its bytes never change, so its identity —
+and every permission you grant it — is stable forever.
+
+**Updating from then on is just `git pull`** — no rebuild; the app always runs
+the checked-out source, so reopening it picks up the new code. Re-run
+`tools/make_launcher.sh` only if you move the repo or it tells you to (e.g. a
+changed launcher script). Run `pip install -r requirements.txt` after a pull that
+changes dependencies.
+
+> The launcher bakes in your repo + venv path, so it's per-machine — each
+> developer runs `tools/make_launcher.sh` once on their own clone. It is **not**
+> a shareable binary. To hand MiniBurp to someone who won't clone the repo, use
+> `./build.sh` to cut a standalone, self-contained `.app`.
 
 Useful environment variables:
 

@@ -133,6 +133,48 @@ def test_repeater_session_history_and_diff(app):
         s.deleteLater()
 
 
+def test_intercept_response_pane_edits_and_forwards(app):
+    """A held response can be edited (flip Set-Cookie) and forwarded — the lab
+    workflow this feature exists for."""
+    import threading
+    import time
+
+    from miniburp.qt.main_window import MainWindow
+    from miniburp.intercept import INTERCEPT
+    from miniburp.storage import STORE
+
+    STORE.clear()
+    tx = STORE.add(method="POST", scheme="https", host="lab.net", port=443,
+                   path="/login", req_headers={}, req_body=b"")
+    w = MainWindow("127.0.0.1", 8080)
+    try:
+        INTERCEPT.set_responses_enabled(True)
+        original = b"HTTP/1.1 200 OK\r\nSet-Cookie: Admin=false\r\n\r\nx"
+        res = {}
+        th = threading.Thread(
+            target=lambda: res.update(zip(("action", "bytes"),
+                                          INTERCEPT.hold_response(tx.id, original))))
+        th.start()
+        for _ in range(200):
+            if tx.id in INTERCEPT.held_response_ids():
+                break
+            time.sleep(0.01)
+
+        # The tab would normally get this via the bridge signal; call directly.
+        w.intercept_tab._on_held(tx.id, "response")
+        pane = w.intercept_tab._panes[(tx.id, "response")]
+        pane.editor.set_bytes(b"HTTP/1.1 200 OK\r\nSet-Cookie: Admin=true\r\n\r\nx")
+        pane._forward()
+        th.join(timeout=2)
+
+        assert res["action"] == "forward"
+        assert b"Admin=true" in res["bytes"]
+    finally:
+        INTERCEPT.set_responses_enabled(False)
+        w.close()
+        STORE.clear()
+
+
 def test_render_mode_only_for_html_readonly(app):
     from miniburp.qt.widgets.http_viewer import HttpEditor, HttpViewer
 

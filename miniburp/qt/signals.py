@@ -39,6 +39,8 @@ class StoreBridge(QObject):
         cleared()                   - history was wiped
         intercept_held(int tx_id)   - a request was held by INTERCEPT
         intercept_released(int)     - a held request was forwarded / dropped
+        intercept_response_held(int)     - a response was held by INTERCEPT
+        intercept_response_released(int) - a held response was forwarded / dropped
     """
 
     added = Signal(dict)
@@ -46,6 +48,8 @@ class StoreBridge(QObject):
     cleared = Signal()
     intercept_held = Signal(int)
     intercept_released = Signal(int)
+    intercept_response_held = Signal(int)
+    intercept_response_released = Signal(int)
 
     # Internal signal: emitted from the pump thread, routed onto the Qt main
     # thread via a queued connection and handed to ``_dispatch``.
@@ -107,3 +111,11 @@ class StoreBridge(QObject):
             tid = ev.get("tx_id")
             if isinstance(tid, int):
                 self.intercept_released.emit(tid)
+        elif kind == "intercept-response":
+            tid = ev.get("tx_id")
+            if isinstance(tid, int):
+                self.intercept_response_held.emit(tid)
+        elif kind == "intercept-response-clear":
+            tid = ev.get("tx_id")
+            if isinstance(tid, int):
+                self.intercept_response_released.emit(tid)

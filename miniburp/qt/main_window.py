@@ -908,8 +908,10 @@ class MainWindow(QMainWindow):
                 self._chrome_proc.terminate()
             except Exception:
                 pass
-        # Release any held intercepts.
+        # Release any held intercepts (requests and responses) so blocked proxy
+        # worker threads don't hang on shutdown.
         INTERCEPT.set_enabled(False)
+        INTERCEPT.set_responses_enabled(False)
         # Shut down the bridge thread.
         self._bridge.shutdown()
         super().closeEvent(event)
